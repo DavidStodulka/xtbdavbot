@@ -1,6 +1,5 @@
 import os
 import aiohttp
-import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -87,12 +86,8 @@ async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
-    await app.run_polling()
+    await app.run_polling()  # ✅ Nespouštíme loop ručně, Render si to vezme
 
 if __name__ == "__main__":
-    import sys
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    loop = asyncio.get_event_loop()
-    loop.create_task(main())
-    loop.run_forever()
+    import asyncio
+    asyncio.run(main())  # ✅ Funguje na Renderu správně, bez ruční smyčky
