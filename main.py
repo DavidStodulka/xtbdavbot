@@ -1,8 +1,10 @@
 import os
+import asyncio
 import aiohttp
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.error import TelegramError
+
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
