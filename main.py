@@ -1,6 +1,5 @@
 import os
 import aiohttp
-import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.error import TelegramError
@@ -8,7 +7,6 @@ from telegram.error import TelegramError
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
 
-# Definice klíčových slov a jejich vah
 TRACKING_TOPICS = {
     "ai_tech": {
         "keywords": ["AI", "artificial intelligence", "machine learning", "deep learning", "Microsoft", "NVIDIA", "Meta", "Cathie Wood"],
@@ -79,7 +77,6 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         details.append(f"{topic}: skóre {score}")
         total_score += score
 
-    # Vyhodnocení výsledku podle celkového skóre
     if total_score > 5:
         prediction = "Trh vypadá býčím směrem 🚀 (silný signál)"
     elif total_score > 0:
@@ -94,15 +91,16 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     detail_text = "\n".join(details)
     await update.message.reply_text(f"{prediction}\n\nPodrobnosti:\n{detail_text}")
 
-async def main():
+def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Vymazání webhooku před spuštěním bota
-    await delete_webhook(app)
+    async def prepare_and_run():
+        await delete_webhook(app)
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("check", check))
+        await app.run_polling()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("check", check))
-    await app.run_polling()
+    asyncio.run(prepare_and_run())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
