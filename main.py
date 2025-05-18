@@ -1,9 +1,8 @@
 import os
-import asyncio
 import aiohttp
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from telegram.error import TelegramError
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
@@ -84,28 +83,16 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     detail_text = "\n".join(details)
     await update.message.reply_text(f"{prediction}\n\nPodrobnosti:\n{detail_text}")
 
-async def prepare_and_run():
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Reset webhook, kdyby byl aktivní (ochrana proti "Conflict")
-            webhook_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook"
-            async with session.post(webhook_url) as resp:
-                if resp.status == 200:
-                    print("✅ Webhook byl úspěšně smazán.")
-                else:
-                    print(f"⚠️ Nepodařilo se smazat webhook. Status: {resp.status}")
-    except TelegramError as e:
-        print(f"Chyba při mazání webhooku: {e}")
-
+async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
     await app.run_polling()
 
-def main():
-    loop = asyncio.get_event_loop()
-    loop.create_task(prepare_and_run())
-    loop.run_forever()
-
 if __name__ == "__main__":
-    main()
+    import sys
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())
+    loop.run_forever()
