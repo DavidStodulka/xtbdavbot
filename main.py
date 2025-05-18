@@ -1,7 +1,10 @@
 import os
 import aiohttp
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import Application, defaults
+from telegram.ext import idle
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
@@ -84,10 +87,16 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
-    await app.run_polling()  # ✅ Nespouštíme loop ručně, Render si to vezme
+
+    await app.initialize()
+    await app.start()
+    print("XTBDavBot běží ✅")
+    await idle()
+    await app.stop()
+    await app.shutdown()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())  # ✅ Funguje na Renderu správně, bez ruční smyčky
+    asyncio.run(main())  # Toto už funguje, protože neukončujeme loop ručně uvnitř app.run_polling()
