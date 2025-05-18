@@ -1,102 +1,70 @@
+import logging
 import os
-import aiohttp
-import asyncio
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from telegram.ext import Application, defaults
-from telegram.ext import idle
+from telegram.ext import Application, CommandHandler, ContextTypes
+import requests
+import re
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# Nastavení logování
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Tvoje proměnné prostředí
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
 
-TRACKING_TOPICS = {
-    "ai_tech": {
-        "keywords": ["AI", "artificial intelligence", "machine learning", "deep learning", "Microsoft", "NVIDIA", "Meta", "Cathie Wood"],
-        "weight": 3
-    },
-    "politics_geopolitics": {
-        "keywords": ["Biden", "Xi Jinping", "Jerome Powell", "FED", "war", "sanctions", "trade war", "election", "inflation"],
-        "weight": 4
-    },
-    "weather_natural_events": {
-        "keywords": ["hurricane", "earthquake", "flood", "climate change", "storm", "drought"],
-        "weight": 2
-    },
-    "cryptocurrency": {
-        "keywords": ["dogecoin", "Elon Musk"],
-        "weight": 1
-    }
-}
+# Funkce pro zpracování příkazů
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Bot je aktivní. Napiš /check pro analýzu.")
 
-async def fetch_tweets(keyword):
-    url = f"https://api.twitter.com/2/tweets/search/recent?query={keyword}&max_results=10"
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sentiment = analyze_sentiment()
+    await update.message.reply_text(f"Aktuální sentiment: {sentiment}")
+
+# Analýza sentimentu z Twitteru
+def analyze_sentiment() -> str:
     headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data.get("data", [])
-            else:
-                return []
+    url = "https://api.twitter.com/2/tweets/search/recent?query=bitcoin&max_results=10"
 
-def analyze_tweets(tweets, weight=1):
-    positive_words = ["profit", "gain", "bull", "rise", "up", "surge", "win"]
-    negative_words = ["loss", "bear", "drop", "decline", "down", "fall", "risk"]
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        tweets = response.json().get("data", [])
+        text_combined = " ".join(tweet["text"] for tweet in tweets)
 
-    score = 0
-    for tweet in tweets:
-        text = tweet.get("text", "").lower()
-        for word in positive_words:
-            if word in text:
-                score += 1 * weight
-        for word in negative_words:
-            if word in text:
-                score -= 1 * weight
-    return score
+        # Zjednodušená analýza: kladná/negativní slova
+        positive_words = ["bull", "moon", "pump", "green", "profit"]
+        negative_words = ["bear", "crash", "dump", "red", "loss"]
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot je online, připraven sledovat Twitter signály ve vybraných oborech.")
+        pos_count = sum(len(re.findall(rf"\b{word}\b", text_combined, re.IGNORECASE)) for word in positive_words)
+        neg_count = sum(len(re.findall(rf"\b{word}\b", text_combined, re.IGNORECASE)) for word in negative_words)
 
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    total_score = 0
-    details = []
+        if pos_count > neg_count:
+            return "Pozitivní 📈"
+        elif neg_count > pos_count:
+            return "Negativní 📉"
+        else:
+            return "Neutrální 😐"
 
-    for topic, config in TRACKING_TOPICS.items():
-        keyword_query = " OR ".join(config["keywords"])
-        tweets = await fetch_tweets(keyword_query)
-        if not tweets:
-            details.append(f"{topic}: Žádné tweety")
-            continue
-        score = analyze_tweets(tweets, weight=config["weight"])
-        details.append(f"{topic}: skóre {score}")
-        total_score += score
+    except Exception as e:
+        logger.error(f"Chyba při analýze: {e}")
+        return "Nepodařilo se načíst data ❌"
 
-    if total_score > 5:
-        prediction = "Trh vypadá býčím směrem 🚀 (silný signál)"
-    elif total_score > 0:
-        prediction = "Trh je mírně býčí."
-    elif total_score == 0:
-        prediction = "Trh je neutrální."
-    elif total_score > -5:
-        prediction = "Trh může být mírně medvědí."
-    else:
-        prediction = "Varování: trh může klesat 🐻 (silný signál)"
-
-    detail_text = "\n".join(details)
-    await update.message.reply_text(f"{prediction}\n\nPodrobnosti:\n{detail_text}")
-
-async def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+# Spuštění bota
+def main() -> None:
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
 
-    await app.initialize()
-    await app.start()
-    print("XTBDavBot běží ✅")
-    await idle()
-    await app.stop()
-    await app.shutdown()
+    # Pouze await bez asyncio.run()
+    app.run_polling()  # Render sám řeší event loop
 
 if __name__ == "__main__":
-    asyncio.run(main())  # Toto už funguje, protože neukončujeme loop ručně uvnitř app.run_polling()
+    main()
