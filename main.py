@@ -1,13 +1,27 @@
 import os
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Bot
+from telegram.ext import Updater, CommandHandler
 
-TELEGRAM_TOKEN = os.getenv("API_TOKEN")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Vítej! Tvůj XTBDavBot je online a připravený.")
+bot = Bot(token=TOKEN)
+
+def start(update, context):
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Bot je online!")
+
+def send_message(update, context):
+    bot.send_message(chat_id=CHAT_ID, text="Ahoj, tohle je test zpráva!")
+
+def main():
+    updater = Updater(token=TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("send", send_message))
+
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.run_polling()
+    main()
