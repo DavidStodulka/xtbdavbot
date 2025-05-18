@@ -5,7 +5,6 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.error import TelegramError
 
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
 
@@ -28,13 +27,6 @@ TRACKING_TOPICS = {
     }
 }
 
-async def delete_webhook(application):
-    try:
-        await application.bot.delete_webhook()
-        print("Webhook byl úspěšně smazán.")
-    except TelegramError as e:
-        print(f"Chyba při mazání webhooku: {e}")
-
 async def fetch_tweets(keyword):
     url = f"https://api.twitter.com/2/tweets/search/recent?query={keyword}&max_results=10"
     headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
@@ -44,7 +36,6 @@ async def fetch_tweets(keyword):
                 data = await resp.json()
                 return data.get("data", [])
             else:
-                print(f"Chyba při získávání tweetů: {resp.status}")
                 return []
 
 def analyze_tweets(tweets, weight=1):
@@ -93,16 +84,28 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     detail_text = "\n".join(details)
     await update.message.reply_text(f"{prediction}\n\nPodrobnosti:\n{detail_text}")
 
-def main():
+async def prepare_and_run():
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Reset webhook, kdyby byl aktivní (ochrana proti "Conflict")
+            webhook_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook"
+            async with session.post(webhook_url) as resp:
+                if resp.status == 200:
+                    print("✅ Webhook byl úspěšně smazán.")
+                else:
+                    print(f"⚠️ Nepodařilo se smazat webhook. Status: {resp.status}")
+    except TelegramError as e:
+        print(f"Chyba při mazání webhooku: {e}")
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("check", check))
+    await app.run_polling()
 
-    async def prepare_and_run():
-        await delete_webhook(app)
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("check", check))
-        await app.run_polling()
-
-    asyncio.run(prepare_and_run())
+def main():
+    loop = asyncio.get_event_loop()
+    loop.create_task(prepare_and_run())
+    loop.run_forever()
 
 if __name__ == "__main__":
     main()
