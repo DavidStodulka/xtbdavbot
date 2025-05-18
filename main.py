@@ -1,7 +1,9 @@
 import os
 import aiohttp
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.error import TelegramError
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
@@ -26,7 +28,12 @@ TRACKING_TOPICS = {
     }
 }
 
-# Pozor, můžeš přidat další váhy nebo lidi podle potřeby
+async def delete_webhook(application):
+    try:
+        await application.bot.delete_webhook()
+        print("Webhook byl úspěšně smazán.")
+    except TelegramError as e:
+        print(f"Chyba při mazání webhooku: {e}")
 
 async def fetch_tweets(keyword):
     url = f"https://api.twitter.com/2/tweets/search/recent?query={keyword}&max_results=10"
@@ -37,6 +44,7 @@ async def fetch_tweets(keyword):
                 data = await resp.json()
                 return data.get("data", [])
             else:
+                print(f"Chyba při získávání tweetů: {resp.status}")
                 return []
 
 def analyze_tweets(tweets, weight=1):
@@ -86,11 +94,15 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     detail_text = "\n".join(details)
     await update.message.reply_text(f"{prediction}\n\nPodrobnosti:\n{detail_text}")
 
-def main():
+async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # Vymazání webhooku před spuštěním bota
+    await delete_webhook(app)
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
-    app.run_polling()
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
