@@ -4,29 +4,32 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
 
-keywords = [
-    "artificial intelligence", "AI", "machine learning", "deep learning", "tech",
-    "semiconductor", "NVIDIA", "Intel", "AMD",
-    "US500", "SP500", "NASDAQ100", "US100", "DOW30", "US30",
-    "dogecoin", "doge", "Elon Musk"
-]
+# Definice klíčových slov a jejich vah
+TRACKING_TOPICS = {
+    "ai_tech": {
+        "keywords": ["AI", "artificial intelligence", "machine learning", "deep learning", "Microsoft", "NVIDIA", "Meta", "Cathie Wood"],
+        "weight": 3
+    },
+    "politics_geopolitics": {
+        "keywords": ["Biden", "Xi Jinping", "Jerome Powell", "FED", "war", "sanctions", "trade war", "election", "inflation"],
+        "weight": 4
+    },
+    "weather_natural_events": {
+        "keywords": ["hurricane", "earthquake", "flood", "climate change", "storm", "drought"],
+        "weight": 2
+    },
+    "cryptocurrency": {
+        "keywords": ["dogecoin", "Elon Musk"],
+        "weight": 1
+    }
+}
 
-users = [
-    "elonmusk", "satyanadella", "JensenHuang", "CathieDWood", "VitalikButerin"
-]
+# Pozor, můžeš přidat další váhy nebo lidi podle potřeby
 
-positive_words = ["profit", "gain", "bull", "rise"]
-negative_words = ["loss", "bear", "drop", "decline"]
-
-async def fetch_tweets_combined():
-    query = "(" + " OR ".join([f'"{kw}"' for kw in keywords]) + ")"
-    user_queries = [f"from:{user}" for user in users]
-    full_query = query + " OR " + " OR ".join(user_queries)
-
-    url = f"https://api.twitter.com/2/tweets/search/recent?query={full_query}&max_results=20"
+async def fetch_tweets(keyword):
+    url = f"https://api.twitter.com/2/tweets/search/recent?query={keyword}&max_results=10"
     headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:
@@ -36,74 +39,52 @@ async def fetch_tweets_combined():
             else:
                 return []
 
-def analyze_tweets_weighted(tweets):
+def analyze_tweets(tweets, weight=1):
+    positive_words = ["profit", "gain", "bull", "rise", "up", "surge", "win"]
+    negative_words = ["loss", "bear", "drop", "decline", "down", "fall", "risk"]
+
     score = 0
     for tweet in tweets:
         text = tweet.get("text", "").lower()
-        author = tweet.get("author_id", "")
-        
-        # Zjistit jestli je autor v seznamu sledovaných podle author_id (musíme mít mapování, zatím ignorujeme)
-        # Protože API vrací author_id, pro jednoduchost zvýšíme váhu, pokud text obsahuje jméno osoby
-        # (Nedokonalé, ale jednoduché řešení)
-        author_weight = 1
-        for user in users:
-            if user.lower() in text:
-                author_weight = 3
-                break
-
-        # Klíčová slova ve textu (váha 1)
-        keyword_weight = 0
-        for kw in keywords:
-            if kw.lower() in text:
-                keyword_weight = 1
-                break
-
-        # Sentiment
-        sentiment_score = 0
         for word in positive_words:
             if word in text:
-                sentiment_score += 1
+                score += 1 * weight
         for word in negative_words:
             if word in text:
-                sentiment_score -= 1
-        
-        # Celkový příspěvek do skóre
-        score += (author_weight + keyword_weight) * sentiment_score
-
+                score -= 1 * weight
     return score
 
-def risk_percentage(score):
-    # Omezíme skóre do rozmezí -10 až +10
-    if score < -10:
-        score = -10
-    if score > 10:
-        score = 10
-    
-    # Převedeme na riziko 0–100 %, kde záporné skóre znamená vyšší riziko
-    # -10 -> 100%, 0 -> 50%, +10 -> 0%
-    risk = int(((-score + 10) / 20) * 100)
-    return risk
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot je online, připraven sledovat Twitter signály z AI, technologií, akciových indexů a Dogecoinu.")
+    await update.message.reply_text("Bot je online, připraven sledovat Twitter signály ve vybraných oborech.")
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tweets = await fetch_tweets_combined()
-    if not tweets:
-        await update.message.reply_text("Nenalezl jsem žádné nové tweety.")
-        return
+    total_score = 0
+    details = []
 
-    score = analyze_tweets_weighted(tweets)
-    risk = risk_percentage(score)
+    for topic, config in TRACKING_TOPICS.items():
+        keyword_query = " OR ".join(config["keywords"])
+        tweets = await fetch_tweets(keyword_query)
+        if not tweets:
+            details.append(f"{topic}: Žádné tweety")
+            continue
+        score = analyze_tweets(tweets, weight=config["weight"])
+        details.append(f"{topic}: skóre {score}")
+        total_score += score
 
-    if risk > 70:
-        prediction = f"Vysoké riziko poklesu trhu! ⚠️ ({risk} %)"
-    elif risk > 40:
-        prediction = f"Střední riziko - buďte obezřetní. ({risk} %)"
+    # Vyhodnocení výsledku podle celkového skóre
+    if total_score > 5:
+        prediction = "Trh vypadá býčím směrem 🚀 (silný signál)"
+    elif total_score > 0:
+        prediction = "Trh je mírně býčí."
+    elif total_score == 0:
+        prediction = "Trh je neutrální."
+    elif total_score > -5:
+        prediction = "Trh může být mírně medvědí."
     else:
-        prediction = f"Trh vypadá stabilně, nízké riziko poklesu. ({risk} %)"
+        prediction = "Varování: trh může klesat 🐻 (silný signál)"
 
-    await update.message.reply_text(prediction)
+    detail_text = "\n".join(details)
+    await update.message.reply_text(f"{prediction}\n\nPodrobnosti:\n{detail_text}")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
