@@ -2,7 +2,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Vlož sem svůj Telegram Bot Token (od BotFather)
-TOKEN = "tvůj_telegram_token"
+TOKEN = 7970230560:AAH6UDEdxIheReM6WsBkUUEnJC0qMDCdbB4
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot je online a připraven!")
