@@ -1,84 +1,128 @@
-import logging import os from datetime import datetime, timedelta import requests from telegram import Update from telegram.ext import Application, CommandHandler, ContextTypes import openai
+import logging
+import os
+import time
+import requests
+from datetime import datetime, timedelta
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+import openai
 
-ZAPNI LOGOVÁNÍ
+# Logging pro ladění
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-logging.basicConfig( format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO )
+# ENV proměnné
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 
-logger = logging.getLogger(name)
-
-ZÍSKEJ KLÍČE Z ENV
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") GNEWS_API_KEY = os.getenv("GNEWS_API_KEY") CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
+# Nastavení OpenAI
 openai.api_key = OPENAI_API_KEY
 
-KLÍČOVÁ SLOVA
+# Klíčová slova
+KEYWORDS = [
+    "Trump", "Biden", "Putin", "Xi Jinping", "World Leader", "AI", "Technology",
+    "US30", "US100", "US500", "Nasdaq100", "Dogecoin", "USD", "EUR", "JPY", "GBP",
+    "Volatility", "Earthquake", "Flood", "Tornado", "Hurricane", "Explosion", "Terrorist"
+]
 
-KEYWORDS = [ "Trump", "Biden", "Putin", "Xi Jinping", "AI", "artificial intelligence", "US30", "US100", "US500", "Nasdaq100", "Dogecoin", "USD", "EUR", "JPY", "GBP", "CHF", "CNY", "CAD", "AUD", "NZD", "earthquake", "flood", "hurricane", "wildfire", "terror attack", "explosion", "storm", "catastrophe" ]
+# Duplikáty
+sent_articles = set()
 
-PAMĚŤ NA DUPLIKÁTY
+# Filtrovaná detekce důležitosti zprávy
+def is_important(article):
+    title = article.get("title", "").lower()
+    description = article.get("description", "").lower()
+    combined = f"{title} {description}"
+    return any(keyword.lower() in combined for keyword in KEYWORDS)
 
-recent_titles = set()
+# Dotaz na GPT pro vytvoření komentáře
+def generate_market_comment(title, description):
+    prompt = f"""
+    Právě vyšla zpráva:
+    Název: {title}
+    Popis: {description}
 
-FUNKCE PRO ZPRÁVY
+    1. Co to znamená pro trh (akcie, indexy, měny)?
+    2. Co by měl běžný burzovní střelec udělat? (nákup, prodej, držet)
+    3. Přidej srozumitelný komentář – jako bys to vysvětloval kamarádovi v hospodě. 
+    4. Uveď časový výhled dopadu (např. 1h, 4h, 1 den).
+    """
 
-async def fetch_gnews(): url = f"https://gnews.io/api/v4/top-headlines?token={GNEWS_API_KEY}&lang=en" response = requests.get(url) if response.status_code == 200: data = response.json() return data.get("articles", []) else: logger.error(f"GNews error: {response.status_code}") return []
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"OpenAI error: {e}")
+        return "Nepodařilo se vytvořit komentář."
 
-KONTROLA NA KLÍČOVÁ SLOVA
+# Odesílání zprávy do Telegramu
+def send_to_telegram(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        logger.error(f"Telegram error: {e}")
 
-def is_relevant(article): title = article.get("title", "").lower() return any(keyword.lower() in title for keyword in KEYWORDS)
+# Hlavní funkce - pravidelně dotazuje GNews
+def check_news():
+    url = f"https://gnews.io/api/v4/top-headlines?lang=en&max=10&token={GNEWS_API_KEY}"
+    try:
+        response = requests.get(url)
+        data = response.json()
+        articles = data.get("articles", [])
 
-GENERUJ BURANSKOU ANALÝZU
+        for article in articles:
+            title = article.get("title", "")
+            description = article.get("description", "")
+            url = article.get("url", "")
 
-async def generate_comment(article): title = article.get("title", "No title") description = article.get("description", "No description")
+            if not title or not description:
+                continue
 
-prompt = (
-    f"Tady je zpráva: '{title}'. Popis: '{description}'."
-    f" Zhodnoť, jestli to může pohnout trhem (nahoru/dolu), jestli je to kravina, nebo masakr."
-    f" Přidej jestli koupit, prodat, nebo jen čumět. Vystihni to jednoduše, jak burzovní strejda."
-)
+            article_id = f"{title}|{description}"
+            if article_id in sent_articles:
+                continue
 
-response = openai.ChatCompletion.create(
-    model="gpt-4",
-    messages=[
-        {"role": "system", "content": "Jsi burzovní parťák s nosem na velký prachy. Mluvíš srozumitelně a lidsky."},
-        {"role": "user", "content": prompt}
-    ]
-)
+            if is_important(article):
+                sent_articles.add(article_id)
+                comment = generate_market_comment(title, description)
+                message = f"*{title}*\n{description}\n[Otevřít článek]({url})\n\n{comment}"
+                send_to_telegram(message)
 
-return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"News check error: {e}")
 
-HLAVNÍ FUNKCE PRO ZPRACOVÁNÍ
+# /start příkaz
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("XTBDavBot aktivní. Sleduju trh, žádný blábol mi neuteče.")
 
-async def check_news(update: Update = None, context: ContextTypes.DEFAULT_TYPE = None): articles = await context.application.run_in_executor(None, fetch_gnews) new_alerts = []
+# Hlavní funkce aplikace
+def main():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
 
-for article in articles:
-    title = article.get("title")
-    if not is_relevant(article) or title in recent_titles:
-        continue
+    # Spuštění smyčky pro kontrolu zpráv každé 3 minuty
+    async def news_loop():
+        while True:
+            check_news()
+            await asyncio.sleep(180)
 
-    recent_titles.add(title)
-    comment = await generate_comment(article)
+    # Spuštění asynchronně
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.create_task(news_loop())
+    application.run_polling()
 
-    message = f"**ZPRÁVA:** {title}\n\n**SHRNUTÍ:** {comment}\n\nOdkaz: {article.get('url')}"
-    new_alerts.append(message)
-
-for alert in new_alerts:
-    await context.bot.send_message(chat_id=CHAT_ID, text=alert, parse_mode="Markdown")
-
-/start pro ruční spuštění
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("Bot je v provozu. Kdykoli chceš, dej /check.")
-
-/check na vyžádání
-
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE): await check_news(update, context) await update.message.reply_text("Zprávy byly zkontrolovány.")
-
-VYTVOR APLIKACI
-
-app = Application.builder().token(TELEGRAM_TOKEN).build() app.add_handler(CommandHandler("start", start)) app.add_handler(CommandHandler("check", check))
-
-SPUSŤ
-
-if name == "main": app.run_polling()
-
+if __name__ == "__main__":
+    main()
