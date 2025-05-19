@@ -1,85 +1,95 @@
-import logging
+
 import os
-import re
+import logging
 import openai
 import requests
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from datetime import datetime
 
-# Konfigurace
-openai.api_key = os.getenv("OPENAI_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-NEWS_KEYWORDS = ["Trump", "Putin", "China", "Biden", "Russia", "Ukraine", "Federal Reserve", "interest rates", "inflation", "war", "terror", "disaster", "crisis", "nasdaq", "us500", "us30", "dogecoin", "elon", "AI", "dollar", "yen", "euro", "oil", "gas", "NATO", "attack", "bomb", "Ceasefire", "peace talks", "Iran", "Israel", "Bitcoin", "SEC"]
+# Nastavení z .env nebo prostředí Render
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 
-EXCLUDED_TOPICS = ["football", "soccer", "tennis", "Premier League", "NBA", "F1", "cancer", "injury", "celebrity", "Taylor Swift", "Liverpool", "Brighton"]
+openai.api_key = OPENAI_API_KEY
 
-# Logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Kontextová proměnná pro vypnutí
-active = True
+KEYWORDS = ["Trump", "Biden", "Putin", "Ukraine", "Russia", "terror", "explosion", "AI", "Dow Jones", 
+            "Nasdaq", "US500", "US30", "US100", "interest rates", "inflation", "Dogecoin", 
+            "Euro", "Dollar", "EURUSD", "USDJPY", "war", "attack", "weather", "disaster"]
+
+LAST_HEADLINES = set()
+
+# Proměnná pro přepínání minimálního prahu dopadu
+MINIMUM_IMPACT_LEVEL = ["střední", "vysoký"]
+
+async def analyze_article(article_text):
+    prompt = f"""
+Zpráva: {article_text}
+
+Zhodnoť tuto zprávu z hlediska dopadu na finanční trhy (indexy, měny, komodity, CFD). Vyhodnoť:
+
+1. Má tato zpráva potenciální dopad na trh? (ANO/NE)
+2. Pokud ano, jaký je potenciální dopad: Nízký / Střední / Vysoký
+3. Jaký trh nebo instrument ovlivní? (např. US500, EURUSD, ropa, zlato)
+4. Doporučený směr: LONG / SHORT / NIC
+5. Doporučený časový rámec (např. 1h, 1 den, 1 týden)
+6. Riziko (Nízké / Střední / Vysoké)
+7. Potenciál zisku slovně
+8. Komentář k logice doporučení – stručně, prakticky.
+
+Pokud zpráva není relevantní pro CFD trhy, napiš pouze:
+"NE – zpráva nemá dopad na obchodovatelné instrumenty."
+"""
+
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    analysis = response.choices[0].message.content.strip()
+    return analysis
+
+async def check_news(context: ContextTypes.DEFAULT_TYPE):
+    logging.info("Kontroluji zprávy...")
+    url = f"https://gnews.io/api/v4/top-headlines?token={GNEWS_API_KEY}&lang=en"
+    response = requests.get(url)
+    data = response.json()
+
+    for article in data.get("articles", []):
+        title = article["title"]
+        content = article.get("content", "")
+        full_text = f"{title} {content}"
+
+        if title in LAST_HEADLINES:
+            continue
+        if not any(keyword.lower() in full_text.lower() for keyword in KEYWORDS):
+            continue
+
+        LAST_HEADLINES.add(title)
+        analysis = await analyze_article(full_text)
+
+        if "NE – zpráva nemá dopad" in analysis:
+            continue  # přeskočíme nerelevantní zprávy
+
+        impact_line = next((line for line in analysis.splitlines() if "dopad:" in line.lower()), "")
+        if any(level in impact_line.lower() for level in MINIMUM_IMPACT_LEVEL):
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"Zpráva:
+{title}
+
+Analýza:
+{analysis}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot je aktivní. Sleduji novinky...")
-
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global active
-    active = False
-    await update.message.reply_text("Bot byl vypnut.")
-
-def is_relevant(text: str) -> bool:
-    text_lower = text.lower()
-    if any(ex.lower() in text_lower for ex in EXCLUDED_TOPICS):
-        return False
-    return any(k.lower() in text_lower for k in NEWS_KEYWORDS)
-
-def analyze_sentiment(text: str) -> str:
-    prompt = (
-        f"Zpráva: {text}\n\n"
-        "Odpověz přehledně: \n"
-        "- Má zpráva významný dopad na finanční trh? (ano/ne)\n"
-        "- Jaká strategie by se mohla vyplatit? (long/short/žádná)\n"
-        "- Co konkrétně koupit/prodat? (např. US500, USDJPY...)\n"
-        "- Jak dlouho držet? (krátkodobě/střednědobě/dlouhodobě)\n"
-        "- Riziko: nízké/střední/vysoké\n"
-        "- Potenciální výdělek: malý/střední/vysoký\n"
-        "- Komentář (max 3 věty lidským tónem):"
-    )
-
-    try:
-        completion = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
-            temperature=0.7
-        )
-        return completion.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"OpenAI error: {e}")
-        return "Nepodařilo se analyzovat zprávu."
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global active
-    if not active:
-        return
-
-    text = update.message.text
-    if is_relevant(text):
-        logger.info("Relevantní zpráva: " + text)
-        result = analyze_sentiment(text)
-        await update.message.reply_text(result)
-    else:
-        logger.info("Zpráva ignorována (nerelevantní): " + text)
-
-# Spuštění
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("Bot spuštěn.")
-    app.run_polling()
+    await update.message.reply_text("Bot je aktivní a sleduje zprávy.")
 
 if __name__ == "__main__":
-    main()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.job_queue.run_repeating(check_news, interval=300, first=5)
+
+    logging.info("Bot spuštěn.")
+    app.run_polling()
