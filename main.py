@@ -1,64 +1,65 @@
-import logging import os import re import asyncio import httpx from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes from openai import AsyncOpenAI from gnews import GNews
+import logging import os import re import time import telegram import openai import requests from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-Nastavení logování
+Logování
 
 logging.basicConfig(level=logging.INFO) logger = logging.getLogger(name)
 
-Inicializace klientů
+Klíče a ID
 
-openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN") CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") RELEVANT_KEYWORDS = ["Trump", "Biden", "Putin", "AI", "Nvidia", "inflation", "interest rates", "NASDAQ", "Dow Jones", "terror", "earthquake", "hurricane", "war", "dogecoin", "currency"]
+openai.api_key = OPENAI_API_KEY
 
-Filtrování nerelevantních zpráv (fotbal, celebrity, atd.)
+Klíčová slova relevantní pro finanční trhy
 
-NONSENSE_KEYWORDS = ["football", "Premier League", "soccer", "Liverpool", "Brighton", "celebrity", "Kim Kardashian", "tennis", "NBA", "FIFA", "movie", "concert", "actor", "Biden cancer"]
+KEYWORDS = [ "Trump", "Biden", "Putin", "Ukraine", "Russia", "war", "AI", "inflation", "interest rates", "Federal Reserve", "Nasdaq", "S&P", "Dow Jones", "USD", "EUR", "JPY", "Bitcoin", "Dogecoin", "crash", "soar", "plunge", "rally", "China", "Taiwan", "NATO", "ECB", "BoJ", "Fed", "market", "stocks", "weather", "earthquake", "terrorism", "explosion", "attack" ]
 
-GNews klient
+Funkce pro získání zpráv z GNews
 
-gnews = GNews(language='en', max_results=5)
+def fetch_news(): try: response = requests.get( f"https://gnews.io/api/v4/top-headlines?lang=en&token={GNEWS_API_KEY}&max=10" ) news_items = response.json().get("articles", []) filtered = [] for item in news_items: content = f"{item['title']} {item.get('description', '')}" if any(keyword.lower() in content.lower() for keyword in KEYWORDS): filtered.append(content) return filtered except Exception as e: logger.error(f"Chyba při stahování zpráv: {e}") return []
 
-Funkce pro filtrování zpráv
+AI generátor shrnutí, investičního doporučení a metrik
 
-def is_relevant(article): text = (article.title + " " + article.description).lower() if any(keyword.lower() in text for keyword in NONSENSE_KEYWORDS): return False return any(keyword.lower() in text for keyword in RELEVANT_KEYWORDS)
+def generate_ai_comment(news_text): try: prompt = f""" Zpráva: {news_text}
 
-Generování komentáře pomocí OpenAI
+Vytvoř investiční shrnutí zprávy v tomto formátu:
 
-async def generate_commentary(title, description): prompt = f""" Jsi zkušený burzovní analytik. Na základě této zprávy:
+ZPRÁVA: <stručný popis>
 
-Rozhodni, zda má vliv na CFD trhy (ANO/NE).
+AI KOMENTÁŘ: <stručný dopad na trh, reálný vývoj>
 
-Pokud ANO: napiš 1 odstavec komentáře, navrhni konkrétní směr obchodu (long/short/hold), jaký typ instrumentu (akcie, měna, index, komodita), jaké je riziko (nízké/střední/vysoké), potenciální výdělek (nízký/střední/vysoký), a číselný návrh vstupní ceny, SL a TP.
+DOPORUČENÍ:
 
-Pokud NE: napiš pouze: BEZ DOPADU NA TRHY
+Pozice: long/short/žádná
+
+Nástroje: konkrétní instrumenty (např. EUR/USD, NASDAQ100, ropa)
+
+Riziko: nízké/střední/vysoké
+
+Výnosový potenciál: nízký/střední/vysoký + horizont
+
+Stop-loss: konkrétní nebo přibližná hodnota
+
+Cíl: % nebo přibližná hodnota
 
 
-Zpráva: Nadpis: {title} Obsah: {description} """ try: response = await openai_client.chat.completions.create( model="gpt-4", messages=[ {"role": "system", "content": "Jsi AI analytik specializující se na CFD trhy."}, {"role": "user", "content": prompt} ], temperature=0.5, max_tokens=500 ) commentary = response.choices[0].message.content.strip() logger.info(f"AI COMMENT: {commentary}") return commentary except Exception as e: logger.error(f"OpenAI error: {e}") return None
+Nepiš víc, než je potřeba, jen fakta a přímo. """ response = openai.chat.completions.create( model="gpt-4", messages=[ {"role": "system", "content": "Jsi finanční tržní stratég."}, {"role": "user", "content": prompt} ] ) return response.choices[0].message.content.strip() except Exception as e: logger.error(f"OpenAI error: {e}") return "Chyba při získávání AI komentáře."
 
-Funkce pro kontrolu novinek
+Funkce pro odeslání zprávy na Telegram
 
-async def check_news(context: ContextTypes.DEFAULT_TYPE): articles = gnews.get_news("Trump OR Biden OR AI OR inflation OR Nasdaq OR war OR dogecoin OR Putin") for article in articles: if is_relevant(article): logger.info(f"Relevantní zpráva: {article.title}") commentary = await generate_commentary(article.title, article.description) if commentary and "BEZ DOPADU NA TRHY" not in commentary: await context.bot.send_message(chat_id=CHAT_ID, text=f"{article.title}\n{article.description}\n\n{commentary}")
+def send_to_telegram(message): bot = telegram.Bot(token=TELEGRAM_TOKEN) bot.send_message(chat_id=CHAT_ID, text=message)
 
-Příkazy Telegram bota
+Základní příkazy bota
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("XTBDavBot je aktivní a připravený.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("XTBDavBot aktivní. Použij /check pro novinky, /stop pro ukončení.")
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("XTBDavBot se nyní vypíná.") os._exit(0)
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE): news_items = fetch_news() if not news_items: await update.message.reply_text("Žádné relevantní zprávy.") return for news in news_items: comment = generate_ai_comment(news) if "Pozice" in comment: send_to_telegram(comment) time.sleep(1)
 
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE): await check_news(context) await update.message.reply_text("Zprávy zkontrolovány.")
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("XTBDavBot byl zastaven. Pokud běží v cloudu, vypni proces manuálně.")
 
-Spuštění bota
+Hlavní běh aplikace
 
-async def main(): app = ApplicationBuilder().token(BOT_TOKEN).build()
+def main(): app = ApplicationBuilder().token(TELEGRAM_TOKEN).build() app.add_handler(CommandHandler("start", start)) app.add_handler(CommandHandler("check", check)) app.add_handler(CommandHandler("stop", stop)) app.run_polling()
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("stop", stop))
-app.add_handler(CommandHandler("check", check))
-
-job_queue = app.job_queue
-job_queue.run_repeating(check_news, interval=300, first=5)
-
-await app.run_polling()
-
-if name == 'main': asyncio.run(main())
+if name == 'main': main()
 
