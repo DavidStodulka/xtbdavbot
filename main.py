@@ -1,95 +1,84 @@
-
 import os
 import logging
-import openai
 import requests
+import openai
+import telegram
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from datetime import datetime
 
-# Nastavení z .env nebo prostředí Render
+# Nastavení loggingu
+logging.basicConfig(level=logging.INFO)
+
+# Načtení proměnných z prostředí
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 
+# Inicializace OpenAI
 openai.api_key = OPENAI_API_KEY
 
-logging.basicConfig(level=logging.INFO)
+# Klíčová slova k detekci relevantních zpráv
+RELEVANT_KEYWORDS = [
+    "Trump", "Putin", "Biden", "China", "Taiwan", "Ukraine", "Russia", "inflation",
+    "interest rates", "AI", "Federal Reserve", "Nasdaq", "S&P", "US30", "US500",
+    "US100", "gold", "oil", "natural gas", "Dogecoin", "USD", "EUR", "GBP", "JPY",
+    "terror", "earthquake", "crisis", "explosion", "bank", "NATO"
+]
 
-KEYWORDS = ["Trump", "Biden", "Putin", "Ukraine", "Russia", "terror", "explosion", "AI", "Dow Jones", 
-            "Nasdaq", "US500", "US30", "US100", "interest rates", "inflation", "Dogecoin", 
-            "Euro", "Dollar", "EURUSD", "USDJPY", "war", "attack", "weather", "disaster"]
+async def fetch_news():
+    url = f"https://gnews.io/api/v4/top-headlines?token={GNEWS_API_KEY}&lang=en&max=10"
+    response = requests.get(url)
+    articles = response.json().get("articles", [])
+    return articles
 
-LAST_HEADLINES = set()
+def is_relevant(text):
+    return any(keyword.lower() in text.lower() for keyword in RELEVANT_KEYWORDS)
 
-# Proměnná pro přepínání minimálního prahu dopadu
-MINIMUM_IMPACT_LEVEL = ["střední", "vysoký"]
-
-async def analyze_article(article_text):
+async def analyze_and_summarize(article):
     prompt = f"""
-Zpráva: {article_text}
+Zvaž následující zprávu a rozhodni:
 
-Zhodnoť tuto zprávu z hlediska dopadu na finanční trhy (indexy, měny, komodity, CFD). Vyhodnoť:
-
-1. Má tato zpráva potenciální dopad na trh? (ANO/NE)
-2. Pokud ano, jaký je potenciální dopad: Nízký / Střední / Vysoký
-3. Jaký trh nebo instrument ovlivní? (např. US500, EURUSD, ropa, zlato)
-4. Doporučený směr: LONG / SHORT / NIC
-5. Doporučený časový rámec (např. 1h, 1 den, 1 týden)
-6. Riziko (Nízké / Střední / Vysoké)
-7. Potenciál zisku slovně
-8. Komentář k logice doporučení – stručně, prakticky.
-
-Pokud zpráva není relevantní pro CFD trhy, napiš pouze:
-"NE – zpráva nemá dopad na obchodovatelné instrumenty."
+1. Je relevantní pro finanční trhy?
+2. Pokud ano, napiš přehledný krátký komentář.
+3. Navrhni konkrétní akci: LONG/SHORT, co koupit/prodat, na jak dlouho.
+4. Uveď potenciální výnos slovně a míru rizika.
+Zpráva: "{article['title']}" - {article['description'] or ''}"
 """
-
     response = openai.ChatCompletion.create(
         model="gpt-4",
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_tokens=500
     )
-    analysis = response.choices[0].message.content.strip()
-    return analysis
+    return response.choices[0].message.content.strip()
 
-async def check_news(context: ContextTypes.DEFAULT_TYPE):
-    logging.info("Kontroluji zprávy...")
-    url = f"https://gnews.io/api/v4/top-headlines?token={GNEWS_API_KEY}&lang=en"
-    response = requests.get(url)
-    data = response.json()
+async def check_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Kontroluju novinky...")
+    articles = await fetch_news()
+    for article in articles:
+        text = f"{article['title']} - {article.get('description', '')}"
+        if is_relevant(text):
+            summary = await analyze_and_summarize(article)
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"""Relevantní zpráva:
+{article['title']}
+{article.get('url', '')}
 
-    for article in data.get("articles", []):
-        title = article["title"]
-        content = article.get("content", "")
-        full_text = f"{title} {content}"
-
-        if title in LAST_HEADLINES:
-            continue
-        if not any(keyword.lower() in full_text.lower() for keyword in KEYWORDS):
-            continue
-
-        LAST_HEADLINES.add(title)
-        analysis = await analyze_article(full_text)
-
-        if "NE – zpráva nemá dopad" in analysis:
-            continue  # přeskočíme nerelevantní zprávy
-
-        impact_line = next((line for line in analysis.splitlines() if "dopad:" in line.lower()), "")
-        if any(level in impact_line.lower() for level in MINIMUM_IMPACT_LEVEL):
-            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"Zpráva:
-{title}
-
-Analýza:
-{analysis}")
+Komentář AI:
+{summary}
+""")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot je aktivní a sleduje zprávy.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Bot je připraven. Použij příkaz /check pro kontrolu zpráv.")
 
-if __name__ == "__main__":
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Bot se nyní vypíná.")
+    os._exit(0)
+
+if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.job_queue.run_repeating(check_news, interval=300, first=5)
-
-    logging.info("Bot spuštěn.")
+    app.add_handler(CommandHandler("check", check_news))
+    app.add_handler(CommandHandler("stop", stop))
     app.run_polling()
