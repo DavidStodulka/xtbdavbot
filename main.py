@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-import openai
+from openai import OpenAI
 
 # Logging pro ladění
 logging.basicConfig(level=logging.INFO)
@@ -18,8 +18,8 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 
-# Nastavení OpenAI
-openai.api_key = OPENAI_API_KEY
+# Inicializace OpenAI klienta
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Klíčová slova
 KEYWORDS = [
@@ -50,22 +50,14 @@ Popis: {description}
 3. Přidej srozumitelný komentář – jako bys to vysvětloval kamarádovi v hospodě.
 4. Uveď časový výhled dopadu (např. 1h, 4h, 1 den).
 """
-
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=400,
-            top_p=1,
-            frequency_penalty=0,
-            presence_penalty=0
+            temperature=0.7
         )
-        logger.info(f"OpenAI raw response: {response}")
-        content = response.choices[0].message.get("content", "").strip()
-        if not content:
-            logger.warning("OpenAI vrátil prázdný obsah.")
-            return "Komentář zatím není k dispozici."
+        content = response.choices[0].message.content.strip()
+        logger.info(f"OpenAI response: {content}")
         return content
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
@@ -80,7 +72,8 @@ def send_to_telegram(message):
         "parse_mode": "Markdown"
     }
     try:
-        requests.post(url, json=payload)
+        resp = requests.post(url, json=payload)
+        resp.raise_for_status()
     except Exception as e:
         logger.error(f"Telegram error: {e}")
 
@@ -95,7 +88,7 @@ def check_news():
         for article in articles:
             title = article.get("title", "")
             description = article.get("description", "")
-            url_article = article.get("url", "")
+            url = article.get("url", "")
 
             if not title or not description:
                 continue
@@ -107,7 +100,7 @@ def check_news():
             if is_important(article):
                 sent_articles.add(article_id)
                 comment = generate_market_comment(title, description)
-                message = f"*{title}*\n{description}\n[Otevřít článek]({url_article})\n\n{comment}"
+                message = f"*{title}*\n{description}\n[Otevřít článek]({url})\n\n{comment}"
                 send_to_telegram(message)
 
     except Exception as e:
@@ -122,13 +115,11 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
 
-    # Spuštění smyčky pro kontrolu zpráv každé 3 minuty
     async def news_loop():
         while True:
             check_news()
-            await asyncio.sleep(180)
+            await asyncio.sleep(180)  # 3 minuty
 
-    # Spuštění asynchronně
     loop = asyncio.get_event_loop()
     loop.create_task(news_loop())
     application.run_polling()
