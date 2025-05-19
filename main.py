@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import requests
+import asyncio
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -40,24 +41,32 @@ def is_important(article):
 # Dotaz na GPT pro vytvoření komentáře
 def generate_market_comment(title, description):
     prompt = f"""
-    Právě vyšla zpráva:
-    Název: {title}
-    Popis: {description}
+Právě vyšla zpráva:
+Název: {title}
+Popis: {description}
 
-    1. Co to znamená pro trh (akcie, indexy, měny)?
-    2. Co by měl běžný burzovní střelec udělat? (nákup, prodej, držet)
-    3. Přidej srozumitelný komentář – jako bys to vysvětloval kamarádovi v hospodě. 
-    4. Uveď časový výhled dopadu (např. 1h, 4h, 1 den).
-    """
+1. Co to znamená pro trh (akcie, indexy, měny)?
+2. Co by měl běžný burzovní střelec udělat? (nákup, prodej, držet)
+3. Přidej srozumitelný komentář – jako bys to vysvětloval kamarádovi v hospodě.
+4. Uveď časový výhled dopadu (např. 1h, 4h, 1 den).
+"""
 
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=400
+            max_tokens=400,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0
         )
-        return response.choices[0].message.content.strip()
+        logger.info(f"OpenAI raw response: {response}")
+        content = response.choices[0].message.get("content", "").strip()
+        if not content:
+            logger.warning("OpenAI vrátil prázdný obsah.")
+            return "Komentář zatím není k dispozici."
+        return content
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
         return "Nepodařilo se vytvořit komentář."
@@ -86,7 +95,7 @@ def check_news():
         for article in articles:
             title = article.get("title", "")
             description = article.get("description", "")
-            url = article.get("url", "")
+            url_article = article.get("url", "")
 
             if not title or not description:
                 continue
@@ -98,7 +107,7 @@ def check_news():
             if is_important(article):
                 sent_articles.add(article_id)
                 comment = generate_market_comment(title, description)
-                message = f"*{title}*\n{description}\n[Otevřít článek]({url})\n\n{comment}"
+                message = f"*{title}*\n{description}\n[Otevřít článek]({url_article})\n\n{comment}"
                 send_to_telegram(message)
 
     except Exception as e:
@@ -120,7 +129,6 @@ def main():
             await asyncio.sleep(180)
 
     # Spuštění asynchronně
-    import asyncio
     loop = asyncio.get_event_loop()
     loop.create_task(news_loop())
     application.run_polling()
