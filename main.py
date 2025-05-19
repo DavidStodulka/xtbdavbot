@@ -1,119 +1,116 @@
 import os
 import asyncio
 import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from openai import OpenAI
+from datetime import datetime
 from gnewsclient import GNews
 import requests
-import time
+import openai
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- Nastavení proměnných z prostředí ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
-
-# --- Inicializace klientů ---
-openai = OpenAI(api_key=OPENAI_API_KEY)
-gnews = GNews(language="english", max_results=10)
-
+# Nastavení logování
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Funkce pro získání Twitter zpráv podle klíčových slov ---
-def fetch_twitter_mentions(keywords):
-    headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
-    query = " OR ".join(keywords) + " -is:retweet lang:en"
-    url = f"https://api.twitter.com/2/tweets/search/recent?query={query}&max_results=10"
-    resp = requests.get(url, headers=headers)
-    if resp.status_code != 200:
-        logger.warning(f"Twitter API error: {resp.status_code}")
-        return []
-    tweets = resp.json().get("data", [])
-    return [t["text"] for t in tweets]
+# Proměnné z prostředí
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")  # pokud bude potřeba později
 
-# --- Funkce pro získání Google News ---
-def fetch_google_news():
-    news_items = gnews.get_news()
-    return [item["title"] + " " + item.get("description", "") for item in news_items]
+openai.api_key = OPENAI_API_KEY
 
-# --- Vyhodnocení relevance a generování signálu pomocí OpenAI ---
-async def analyze_news_and_signal(text):
-    prompt = (
-        "Jsi expert na finanční trhy. Podívej se na následující zprávu a rozhodni:\n"
-        "1) Je zpráva relevantní pro finanční trhy? (ano/ne)\n"
-        "2) Jaký typ obchodní příležitosti nabízí? (long, short, držet, ignorovat)\n"
-        "3) Jaké je riziko (nízké, střední, vysoké)?\n"
-        "4) Odhadovaný výnos slovně (např. malý, střední, velký)\n"
-        "5) Krátký komentář k doporučení (max 1 odstavec).\n\n"
-        f"Zpráva: {text}\n\nOdpověď v JSON s klíči: relevant, action, risk, profit, comment."
-    )
-    response = await openai.chat.completions.acreate(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=250,
-        temperature=0.3,
-    )
-    content = response.choices[0].message.content
-    return content
+client = GNews(language='en', max_results=10, period='1d')
 
-# --- Filtrace hloupých zpráv ---
-def is_useful_news(text):
-    nonsense_keywords = [
-        "football", "soccer", "match", "score", "biden cancer", "celebrity gossip",
-        "weather forecast", "horoscope", "movie", "music", "entertainment"
-    ]
-    low_relevance = any(k in text.lower() for k in nonsense_keywords)
-    return not low_relevance
+async def analyze_and_send(update=None, context=None, manual=False):
+    logger.info(f"{'Manual' if manual else 'Auto'} run started at {datetime.now()}")
+    news_items = client.get_news()
 
-# --- Posílání zpráv do Telegramu ---
-async def send_signal(context: ContextTypes.DEFAULT_TYPE, message: str):
-    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+    for item in news_items:
+        title = item.get('title', '')
+        description = item.get('description', '')
+        url = item.get('url', '')
 
-# --- Hlavní periodická úloha ---
-async def periodic_news_check(application):
-    keywords = ["Trump", "AI", "US30", "Nasdaq100", "Dogecoin", "Ukraine", "Russia", "inflation", "FED"]
+        # Základní filtr na nesmysly, sport apod.
+        if any(kw in title.lower() for kw in ['football', 'soccer', 'biden', 'cancer', 'match', 'score']):
+            continue
 
-    while True:
-        all_news = []
-        all_news.extend(fetch_twitter_mentions(keywords))
-        all_news.extend(fetch_google_news())
+        prompt = (
+            "You are a financial market analyst.\n"
+            "Evaluate this news for its impact on financial markets CFD trading:\n"
+            f"Title: {title}\nDescription: {description}\n\n"
+            "Give a score 0 to 10 on potential profit opportunity, "
+            "a simple actionable advice (buy/sell/hold), duration (short/medium/long term), "
+            "risk level (low/medium/high), and a concise comment explaining your reasoning. "
+            "If the score is below 5, say it is not worth trading and stop.\n"
+            "Respond in JSON with keys: score, action, duration, risk, comment."
+        )
 
-        for news in all_news:
-            if not is_useful_news(news):
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+                temperature=0.7,
+            )
+            result_text = response['choices'][0]['message']['content']
+            # Pokusíme se parsovat JSON
+            import json
+            data = json.loads(result_text)
+
+            score = float(data.get('score', 0))
+            if score < 5:
+                logger.info(f"Ignored news (score {score}): {title}")
                 continue
-            analysis = await analyze_news_and_signal(news)
-            # Jednoduchý filtr na základě relevance v odpovědi AI
-            if '"relevant": "ano"' in analysis.lower():
-                message = f"📈 Trading tip:\n{news}\n\nAnalýza:\n{analysis}"
-                await send_signal(application.bot, message)
-                await asyncio.sleep(5)  # mezera mezi zprávami
 
-        await asyncio.sleep(900)  # 15 minut
+            message = (
+                f"News: {title}\n"
+                f"Link: {url}\n"
+                f"Score: {score}/10\n"
+                f"Action: {data.get('action')}\n"
+                f"Duration: {data.get('duration')}\n"
+                f"Risk: {data.get('risk')}\n"
+                f"Comment: {data.get('comment')}"
+            )
 
-# --- Telegram příkazy ---
+            if manual:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=message)
+            else:
+                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+
+            logger.info(f"Sent news analysis: {title}")
+
+        except Exception as e:
+            logger.error(f"OpenAI or Telegram error: {e}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot spuštěn. Budu hledat a posílat relevantní tržní signály.")
-
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot zastaven. Ručně zastavit skript nebo vypnout server.")
+    await update.message.reply_text("Bot started. Use /check to get latest market news analysis.")
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Zkontroluji nové zprávy a pošlu tipy... (spuštěno ručně)")
+    await analyze_and_send(update, context, manual=True)
 
-# --- Spuštění bota ---
-if __name__ == "__main__":
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Bot stopped. You need to restart it manually.")
+
+async def periodic_run(application):
+    while True:
+        try:
+            await analyze_and_send()
+        except Exception as e:
+            logger.error(f"Error during periodic run: {e}")
+        await asyncio.sleep(900)  # 15 minut
+
+def main():
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("check", check))
+    application.add_handler(CommandHandler("stop", stop))
 
-    # Spustit periodickou kontrolu na pozadí
-    async def run_periodic():
-        await periodic_news_check(application)
-
-    asyncio.create_task(run_periodic())
+    # Spustit periodickou úlohu na pozadí
+    asyncio.create_task(periodic_run(application))
 
     application.run_polling()
+
+if __name__ == "__main__":
+    main()
