@@ -3,35 +3,36 @@ import os
 from datetime import datetime, timedelta
 import requests
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
 from openai import OpenAI
 
-# Základní logování
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# OpenAI klient
+# OpenAI
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-# GNews konfigurace
+# Klíče a nastavení
 GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY")
-GNEWS_URL = f"https://gnews.io/api/v4/search?lang=en&max=10&token={GNEWS_API_KEY}"
-
-# Telegram Token a Chat ID
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+GNEWS_URL = f"https://gnews.io/api/v4/search?lang=en&max=10&token={GNEWS_API_KEY}"
 
-# Klíčová slova podle zaměření
+# Klíčová slova
 KEYWORDS = [
-    "Trump", "Biden", "Putin", "Xi Jinping", "von der Leyen",  # Světoví lídři
-    "AI", "chip", "semiconductor", "quantum computing", "OpenAI", "Nvidia",  # Technologie
-    "US30", "US100", "US500", "Nasdaq100",  # Indexy
-    "Dogecoin",  # Jediný krypto
-    "EUR/USD", "USD/JPY", "GBP/USD", "currency crash",  # Měnové výkyvy
-    "earthquake", "hurricane", "flood", "terror attack", "explosion", "mass shooting"  # Katastrofy
+    "Trump", "Biden", "Putin", "Xi Jinping", "von der Leyen",
+    "AI", "chip", "semiconductor", "quantum computing", "OpenAI", "Nvidia",
+    "US30", "US100", "US500", "Nasdaq100",
+    "Dogecoin",
+    "EUR/USD", "USD/JPY", "GBP/USD", "currency crash",
+    "earthquake", "hurricane", "flood", "terror attack", "explosion", "mass shooting"
 ]
 
-# Paměť na odeslané zprávy (proti duplicitám)
 sent_articles = set()
 
 def is_relevant_article(title, description):
@@ -87,7 +88,6 @@ async def check_news_and_notify(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         message = f"*{title}*\n{description}\n[Otevřít článek]({article.get('url')})"
-
         comment = analyze_article_and_generate_comment(f"{title}\n{description}")
         full_message = f"{message}\n\n{comment}"
 
@@ -95,22 +95,28 @@ async def check_news_and_notify(context: ContextTypes.DEFAULT_TYPE):
         sent_articles.add(article_id)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot je připraven sledovat trh. Zkontroluj /check.")
+    await update.message.reply_text("Bot je připraven. Zkontroluj /check.")
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Probíhá kontrola zpráv...")
+    await update.message.reply_text("Kontroluji novinky...")
     await check_news_and_notify(context)
 
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+async def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
 
-    app.job_queue.run_repeating(check_news_and_notify, interval=600, first=10)
+    # Spustíme kontrolu každých 10 minut
+    job_queue = app.job_queue
+    job_queue.run_repeating(callback=check_news_and_notify, interval=600, first=10)
 
-    logger.info("Bot běží...")
-    app.run_polling()
+    logger.info("XTBDavBot běží...")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
