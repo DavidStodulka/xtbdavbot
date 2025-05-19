@@ -8,37 +8,44 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from openai import OpenAI
 
-# Logging pro ladění
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ENV proměnné
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 
-# Inicializace OpenAI klienta
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Klíčová slova
+# Upravená klíčová slova, odstraněný “nonsense”
 KEYWORDS = [
-    "Trump", "Biden", "Putin", "Xi Jinping", "World Leader", "AI", "Technology",
+    "Trump", "Putin", "Xi Jinping", "World Leader", "AI", "Technology",
     "US30", "US100", "US500", "Nasdaq100", "Dogecoin", "USD", "EUR", "JPY", "GBP",
     "Volatility", "Earthquake", "Flood", "Tornado", "Hurricane", "Explosion", "Terrorist"
 ]
 
-# Duplikáty
+# Přidáme blacklist výrazů, které nechceme vůbec pouštět dál
+BLACKLIST = [
+    "football", "soccer", "goal", "match", "Biden cancer", "cancer", "illness", "disease",
+    "hospital", "sick", "injury", "injured", "vaccine", "vaccination", "covid"
+]
+
 sent_articles = set()
 
-# Filtrovaná detekce důležitosti zprávy
 def is_important(article):
     title = article.get("title", "").lower()
     description = article.get("description", "").lower()
     combined = f"{title} {description}"
+
+    # Odfiltruj blacklistový slova
+    if any(bad_word in combined for bad_word in BLACKLIST):
+        logger.info(f"Filtered out nonsense: {title}")
+        return False
+
+    # Klasický filtr na klíčová slova
     return any(keyword.lower() in combined for keyword in KEYWORDS)
 
-# Dotaz na GPT pro vytvoření komentáře
 def generate_market_comment(title, description):
     prompt = f"""
 Právě vyšla zpráva:
@@ -63,7 +70,6 @@ Popis: {description}
         logger.error(f"OpenAI error: {e}")
         return "Nepodařilo se vytvořit komentář."
 
-# Odesílání zprávy do Telegramu
 def send_to_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -77,7 +83,7 @@ def send_to_telegram(message):
     except Exception as e:
         logger.error(f"Telegram error: {e}")
 
-# Hlavní funkce - pravidelně dotazuje GNews
+# Stále stejná hlavní funkce pro zprávy
 def check_news():
     url = f"https://gnews.io/api/v4/top-headlines?lang=en&max=10&token={GNEWS_API_KEY}"
     try:
@@ -110,15 +116,23 @@ def check_news():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("XTBDavBot aktivní. Sleduju trh, žádný blábol mi neuteče.")
 
-# Hlavní funkce aplikace
+# Nový /stop příkaz pro vypnutí bota (vypne polling)
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("XTBDavBot se vypíná. Měj se!")
+    logger.info("Bot zastaven přes příkaz /stop")
+    # ukončí polling a smyčku
+    context.application.stop()
+    # pokud chceš, můžeš přidat sys.exit() nebo nějaký shutdown
+
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop))
 
     async def news_loop():
         while True:
             check_news()
-            await asyncio.sleep(180)  # 3 minuty
+            await asyncio.sleep(180)
 
     loop = asyncio.get_event_loop()
     loop.create_task(news_loop())
