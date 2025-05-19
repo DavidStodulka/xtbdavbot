@@ -7,28 +7,23 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import openai
 import asyncio
 
-# Nastavení logování
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- Proměnné (vše musí být ve tvých variables, ne v kódu) ---
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 GNEWS_API_KEY = os.getenv('GNEWS_API_KEY')
-CHAT_ID = int(os.getenv('CHAT_ID'))  # tvé chat ID
+CHAT_ID = int(os.getenv('CHAT_ID'))
 
-# Klíčová slova dle požadavku
 KEYWORDS = [
     "Trump", "world leader", "AI", "technology", "US30", "US100", "US500",
     "Nasdaq100", "Dogecoin", "currency volatility", "disaster", "weather impact", "terrorism"
 ]
 
-# --- Inicializace OpenAI ---
 openai.api_key = OPENAI_API_KEY
 
-# --- Funkce pro vytažení zpráv z GNews ---
 def fetch_news():
     url = (
         f"https://gnews.io/api/v4/search?q={' OR '.join(KEYWORDS)}&"
@@ -43,7 +38,6 @@ def fetch_news():
         logger.error(f"Chyba při stahování zpráv: {e}")
         return []
 
-# --- Funkce pro kontrolu duplicit ---
 already_sent = set()
 
 def is_duplicate(title):
@@ -52,7 +46,6 @@ def is_duplicate(title):
 def mark_sent(title):
     already_sent.add(title)
 
-# --- Funkce pro AI analýzu ---
 async def generate_analysis(text):
     prompt = (
         "Jsi drsný buran, který rozumí trhu a nebere si servítky. "
@@ -73,7 +66,6 @@ async def generate_analysis(text):
         logger.error(f"OpenAI chyba: {e}")
         return "Nepodařilo se vytvořit komentář."
 
-# --- Hlavní úkol pro periodickou kontrolu zpráv ---
 async def check_news_and_notify(app):
     logger.info("Spouštím kontrolu zpráv...")
     articles = fetch_news()
@@ -83,20 +75,16 @@ async def check_news_and_notify(app):
         description = article.get("description", "")
         content = f"{title}\n{description}\n{url}"
 
-        # Kontrola klíčových slov (jednoduchý filtr)
         if not any(k.lower() in title.lower() + description.lower() for k in KEYWORDS):
             continue
 
-        # Filtrovat duplicitní
         if is_duplicate(title):
             continue
 
         mark_sent(title)
 
-        # Vygenerovat analýzu
         analysis = await generate_analysis(content)
 
-        # Poslat do Telegramu
         message = (
             f"Nová zpráva:\n{title}\n{url}\n\n"
             f"Analýza: {analysis}"
@@ -107,7 +95,6 @@ async def check_news_and_notify(app):
         except Exception as e:
             logger.error(f"Chyba při odesílání zprávy: {e}")
 
-# --- Telegram příkazy ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Čau, jsem tvůj tržní pes. Budu sledovat svět a dávat vědět, kdy to bude stát za to.")
 
@@ -115,22 +102,23 @@ async def checknow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ok, jdu zkontrolovat zprávy...")
     await check_news_and_notify(context.application)
 
-# --- Spuštění bota ---
 async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("checknow", checknow))
 
-    # Spustit periodickou kontrolu každých 10 minut, první po 10 sekundách
-    job_queue = app.job_queue
-    job_queue.run_repeating(
+    # START aplikace a až potom použij job queue
+    await app.start()
+
+    # Po startu už je job_queue připravená
+    app.job_queue.run_repeating(
         callback=lambda ctx: asyncio.create_task(check_news_and_notify(app)),
         interval=600,
         first=10,
     )
 
-    await app.start()
+    # Spustit polling a čekat na ukončení
     await app.updater.start_polling()
     logger.info("Bot běží...")
     await app.updater.idle()
