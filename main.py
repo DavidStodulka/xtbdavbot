@@ -1,142 +1,64 @@
-import logging
-import os
-import time
-import requests
-import asyncio
-from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-from openai import OpenAI
+import logging import os import re import asyncio import httpx from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes from openai import AsyncOpenAI from gnews import GNews
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+Nastavení logování
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
+logging.basicConfig(level=logging.INFO) logger = logging.getLogger(name)
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+Inicializace klientů
 
-# Upravená klíčová slova, odstraněný “nonsense”
-KEYWORDS = [
-    "Trump", "Putin", "Xi Jinping", "World Leader", "AI", "Technology",
-    "US30", "US100", "US500", "Nasdaq100", "Dogecoin", "USD", "EUR", "JPY", "GBP",
-    "Volatility", "Earthquake", "Flood", "Tornado", "Hurricane", "Explosion", "Terrorist"
-]
+openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Přidáme blacklist výrazů, které nechceme vůbec pouštět dál
-BLACKLIST = [
-    "football", "soccer", "goal", "match", "Biden cancer", "cancer", "illness", "disease",
-    "hospital", "sick", "injury", "injured", "vaccine", "vaccination", "covid"
-]
+BOT_TOKEN = os.getenv("BOT_TOKEN") CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") RELEVANT_KEYWORDS = ["Trump", "Biden", "Putin", "AI", "Nvidia", "inflation", "interest rates", "NASDAQ", "Dow Jones", "terror", "earthquake", "hurricane", "war", "dogecoin", "currency"]
 
-sent_articles = set()
+Filtrování nerelevantních zpráv (fotbal, celebrity, atd.)
 
-def is_important(article):
-    title = article.get("title", "").lower()
-    description = article.get("description", "").lower()
-    combined = f"{title} {description}"
+NONSENSE_KEYWORDS = ["football", "Premier League", "soccer", "Liverpool", "Brighton", "celebrity", "Kim Kardashian", "tennis", "NBA", "FIFA", "movie", "concert", "actor", "Biden cancer"]
 
-    # Odfiltruj blacklistový slova
-    if any(bad_word in combined for bad_word in BLACKLIST):
-        logger.info(f"Filtered out nonsense: {title}")
-        return False
+GNews klient
 
-    # Klasický filtr na klíčová slova
-    return any(keyword.lower() in combined for keyword in KEYWORDS)
+gnews = GNews(language='en', max_results=5)
 
-def generate_market_comment(title, description):
-    prompt = f"""
-Právě vyšla zpráva:
-Název: {title}
-Popis: {description}
+Funkce pro filtrování zpráv
 
-1. Co to znamená pro trh (akcie, indexy, měny)?
-2. Co by měl běžný burzovní střelec udělat? (nákup, prodej, držet)
-3. Přidej srozumitelný komentář – jako bys to vysvětloval kamarádovi v hospodě.
-4. Uveď časový výhled dopadu (např. 1h, 4h, 1 den).
-"""
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
-        )
-        content = response.choices[0].message.content.strip()
-        logger.info(f"OpenAI response: {content}")
-        return content
-    except Exception as e:
-        logger.error(f"OpenAI error: {e}")
-        return "Nepodařilo se vytvořit komentář."
+def is_relevant(article): text = (article.title + " " + article.description).lower() if any(keyword.lower() in text for keyword in NONSENSE_KEYWORDS): return False return any(keyword.lower() in text for keyword in RELEVANT_KEYWORDS)
 
-def send_to_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
-    try:
-        resp = requests.post(url, json=payload)
-        resp.raise_for_status()
-    except Exception as e:
-        logger.error(f"Telegram error: {e}")
+Generování komentáře pomocí OpenAI
 
-# Stále stejná hlavní funkce pro zprávy
-def check_news():
-    url = f"https://gnews.io/api/v4/top-headlines?lang=en&max=10&token={GNEWS_API_KEY}"
-    try:
-        response = requests.get(url)
-        data = response.json()
-        articles = data.get("articles", [])
+async def generate_commentary(title, description): prompt = f""" Jsi zkušený burzovní analytik. Na základě této zprávy:
 
-        for article in articles:
-            title = article.get("title", "")
-            description = article.get("description", "")
-            url = article.get("url", "")
+Rozhodni, zda má vliv na CFD trhy (ANO/NE).
 
-            if not title or not description:
-                continue
+Pokud ANO: napiš 1 odstavec komentáře, navrhni konkrétní směr obchodu (long/short/hold), jaký typ instrumentu (akcie, měna, index, komodita), jaké je riziko (nízké/střední/vysoké), potenciální výdělek (nízký/střední/vysoký), a číselný návrh vstupní ceny, SL a TP.
 
-            article_id = f"{title}|{description}"
-            if article_id in sent_articles:
-                continue
+Pokud NE: napiš pouze: BEZ DOPADU NA TRHY
 
-            if is_important(article):
-                sent_articles.add(article_id)
-                comment = generate_market_comment(title, description)
-                message = f"*{title}*\n{description}\n[Otevřít článek]({url})\n\n{comment}"
-                send_to_telegram(message)
 
-    except Exception as e:
-        logger.error(f"News check error: {e}")
+Zpráva: Nadpis: {title} Obsah: {description} """ try: response = await openai_client.chat.completions.create( model="gpt-4", messages=[ {"role": "system", "content": "Jsi AI analytik specializující se na CFD trhy."}, {"role": "user", "content": prompt} ], temperature=0.5, max_tokens=500 ) commentary = response.choices[0].message.content.strip() logger.info(f"AI COMMENT: {commentary}") return commentary except Exception as e: logger.error(f"OpenAI error: {e}") return None
 
-# /start příkaz
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("XTBDavBot aktivní. Sleduju trh, žádný blábol mi neuteče.")
+Funkce pro kontrolu novinek
 
-# Nový /stop příkaz pro vypnutí bota (vypne polling)
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("XTBDavBot se vypíná. Měj se!")
-    logger.info("Bot zastaven přes příkaz /stop")
-    # ukončí polling a smyčku
-    context.application.stop()
-    # pokud chceš, můžeš přidat sys.exit() nebo nějaký shutdown
+async def check_news(context: ContextTypes.DEFAULT_TYPE): articles = gnews.get_news("Trump OR Biden OR AI OR inflation OR Nasdaq OR war OR dogecoin OR Putin") for article in articles: if is_relevant(article): logger.info(f"Relevantní zpráva: {article.title}") commentary = await generate_commentary(article.title, article.description) if commentary and "BEZ DOPADU NA TRHY" not in commentary: await context.bot.send_message(chat_id=CHAT_ID, text=f"{article.title}\n{article.description}\n\n{commentary}")
 
-def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stop", stop))
+Příkazy Telegram bota
 
-    async def news_loop():
-        while True:
-            check_news()
-            await asyncio.sleep(180)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("XTBDavBot je aktivní a připravený.")
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(news_loop())
-    application.run_polling()
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("XTBDavBot se nyní vypíná.") os._exit(0)
 
-if __name__ == "__main__":
-    main()
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE): await check_news(context) await update.message.reply_text("Zprávy zkontrolovány.")
+
+Spuštění bota
+
+async def main(): app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("stop", stop))
+app.add_handler(CommandHandler("check", check))
+
+job_queue = app.job_queue
+job_queue.run_repeating(check_news, interval=300, first=5)
+
+await app.run_polling()
+
+if name == 'main': asyncio.run(main())
+
