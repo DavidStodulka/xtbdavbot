@@ -1,187 +1,164 @@
 import logging
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes, JobQueue
-)
-import aiohttp
-import json
 import os
+import json
+from typing import List, Dict, Any
 
-# --- Logování ---
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+import httpx
+import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from datetime import datetime
+
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- Proměnné z Renderu ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # přidej do Renderu
+CHAT_ID = int(os.getenv("CHAT_ID"))  # Tvůj chat ID
 
-# --- Klíčová slova ---
-WATCHED_TOPICS = [
-    "world leaders", "weather", "disaster", "terrorism", "AI", "artificial intelligence",
-    "Elon Musk", "Dogecoin", "technology", "software", "hardware", "electric vehicles",
-    "USD/EUR", "USD/JPY", "GBP/USD", "US30", "US100", "US500", "Nasdaq100"
-]
+# Ukládání ID tweetů a titulků pro odfiltrování duplicit
+sent_tweet_ids = set()
+sent_gnews_titles = set()
 
-# --- Telegram příkazy ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot spuštěn. Budu ti posílat trading tipy.")
+async def fetch_tweets() -> List[Dict[str, Any]]:
+    url = "https://api.twitter.com/2/tweets/search/recent"
+    query = "Bitcoin lang:en -is:retweet"
+    headers = {
+        "Authorization": f"Bearer {X_BEARER_TOKEN}"
+    }
+    params = {
+        "query": query,
+        "tweet.fields": "id,text,created_at"
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("data", [])
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"X API chyba: {e.response.status_code}")
+            return []
+        except Exception as e:
+            logger.error(f"Chyba při získávání tweetů: {e}")
+            return []
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot zastaven. Žádné další tipy nebudou odesílány.")
+async def fetch_gnews() -> List[Dict[str, Any]]:
+    url = "https://gnews.io/api/v4/top-headlines"
+    params = {
+        "token": GNEWS_API_KEY,
+        "q": "Bitcoin",
+        "lang": "en",
+        "max": 5,
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("articles", [])
+        except Exception as e:
+            logger.error(f"Chyba při získávání GNews: {e}")
+            return []
 
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Kontrola OK, bot běží.")
-
-async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Testovací zpráva dorazila.")
-
-async def manual_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args)
-    if not text:
-        await update.message.reply_text("Zadej zprávu pro analýzu, např. /manual_analysis Apple koupil Tesla.")
-        return
-    result = await analyze_news_with_gpt(text)
-    await update.message.reply_text(result)
-
-# --- GNews ---
-async def fetch_gnews():
-    url = f"https://gnews.io/api/v4/top-headlines?token={GNEWS_API_KEY}&lang=en&max=10"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                return [a['title'] + " " + a.get('description', '') for a in data.get('articles', [])]
-            else:
-                logger.warning(f"GNews API chyba: {response.status}")
-                return []
-
-# --- Twitter ---
-async def fetch_x_tweets():
-    query = "%20OR%20".join(WATCHED_TOPICS)
-    url = f"https://api.twitter.com/2/tweets/search/recent?query={query}&max_results=10&tweet.fields=text"
-    headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
-            if response.status == 200:
-                data = await response.json()
-                return [tweet['text'] for tweet in data.get('data', [])]
-            else:
-                logger.warning(f"X API chyba: {response.status}")
-                return []
-
-# --- GPT analýza ---
-async def analyze_news_with_gpt(text):
-    prompt = f"""
-You are an expert trading analyst. Analyze this news for CFD trading impact:
-
-News: "{text}"
-
-Respond with:
-- Is this relevant for CFD trading? (yes/no)
-- Suggested CFD instrument (e.g. US30, Nasdaq100, DOGE/USD)
-- Entry point price
-- Target price
-- Stop loss price
-- Risk level (low, medium, high)
-- Expected profit percentage
-- Short market commentary (2-3 sentences)
-- Relevance score from 1 to 10
-
-Format your answer in JSON like this:
-
-{{
-  "relevant": "yes",
-  "instrument": "US30",
-  "entry": "34500",
-  "target": "35000",
-  "stoploss": "34300",
-  "risk": "medium",
-  "expected_profit": "3.5%",
-  "comment": "Due to geopolitical tensions, US30 may rise shortly.",
-  "score": 7
-}}
-
-If not relevant, respond with:
-
-{{
-  "relevant": "no"
-}}
-"""
+async def analyze_with_gpt(messages: List[Dict[str, str]]) -> str:
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {
+    body = {
         "model": "gpt-4o",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-        "max_tokens": 400
+        "messages": messages,
+        "max_tokens": 500,
+        "temperature": 0.7
     }
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.post(url, headers=headers, json=body, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            # Očekáváme validní JSON v odpovědi, ale pokud ne, použijeme text přímo
+            try:
+                parsed = json.loads(content)
+                return parsed.get("summary", content)
+            except json.JSONDecodeError:
+                return content
+        except Exception as e:
+            logger.error(f"Chyba GPT API: {e}")
+            return "Analýza se nezdařila."
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload) as resp:
-            if resp.status == 200:
-                result = await resp.json()
-                content = result['choices'][0]['message']['content']
-                try:
-                    parsed = json.loads(content)
-                except json.JSONDecodeError:
-                    logger.error("GPT odpověď není validní JSON.")
-                    return "Chyba: GPT odpověď nebyla validní JSON."
-                if parsed.get("relevant") == "yes":
-                    return (
-                        f"**Trading tip:**\n"
-                        f"Instrument: {parsed['instrument']}\n"
-                        f"Entry: {parsed['entry']}\n"
-                        f"Target: {parsed['target']}\n"
-                        f"Stoploss: {parsed['stoploss']}\n"
-                        f"Riziko: {parsed['risk']}\n"
-                        f"Očekávaný zisk: {parsed['expected_profit']}\n"
-                        f"Komentář: {parsed['comment']}\n"
-                        f"Relevance skóre: {parsed['score']}/10"
-                    )
-                else:
-                    return "Zpráva není relevantní pro CFD trading."
-            else:
-                logger.error(f"OpenAI API chyba: {resp.status}")
-                return "Chyba: Nepodařilo se analyzovat zprávu."
+def create_gpt_prompt(tweets: List[Dict[str, Any]], news: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    combined_text = ""
 
-# --- Pravidelná úloha ---
-async def job_fetch_and_send(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Spouštím kontrolu zpráv...")
-    gnews = await fetch_gnews()
-    tweets = await fetch_x_tweets()
-    messages = gnews + tweets
-    for msg in messages:
-        result = await analyze_news_with_gpt(msg)
-        if "Trading tip" in result:
-            await context.bot.send_message(chat_id=CHAT_ID, text=result)
+    for t in tweets:
+        combined_text += f"Tweet: {t['text']}\n"
+    for article in news:
+        combined_text += f"News: {article['title']} - {article.get('description', '')}\n"
 
-# --- Hlavní funkce ---
+    system_message = {
+        "role": "system",
+        "content": (
+            "Jsi tržní analytik. Na základě následujících tweetů a novinek vytvoř stručnou "
+            "a jasnou analýzu trhu se zaměřením na Bitcoin."
+        )
+    }
+    user_message = {
+        "role": "user",
+        "content": combined_text
+    }
+    return [system_message, user_message]
+
+async def job_fetch_and_send(app: Application):
+    tweets = await fetch_tweets()
+    news = await fetch_gnews()
+
+    # Filtrování nových tweetů a zpráv
+    new_tweets = [t for t in tweets if t["id"] not in sent_tweet_ids]
+    new_news = [n for n in news if n["title"] not in sent_gnews_titles]
+
+    if not new_tweets and not new_news:
+        logger.info("Žádné nové zprávy k odeslání.")
+        return
+
+    # Aktualizace sad ID/titulků
+    sent_tweet_ids.update(t["id"] for t in new_tweets)
+    sent_gnews_titles.update(n["title"] for n in new_news)
+
+    prompt = create_gpt_prompt(new_tweets, new_news)
+    analysis = await analyze_with_gpt(prompt)
+
+    try:
+        await app.bot.send_message(chat_id=CHAT_ID, text=analysis)
+        logger.info("Zpráva odeslána.")
+    except Exception as e:
+        logger.error(f"Chyba při odesílání zprávy: {e}")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Bot běží, používej /check pro manuální kontrolu.")
+
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Spouštím manuální kontrolu...")
+    await job_fetch_and_send(context.application)
+
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("check", check))
-    app.add_handler(CommandHandler("test", test))
-    app.add_handler(CommandHandler("manual_analysis", manual_analysis))
 
-    job_queue: JobQueue = app.job_queue
-    job_queue.run_repeating(
-        job_fetch_and_send,
-        interval=900,  # každých 15 minut
-        first=10,
-        chat_id=CHAT_ID
-    )
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(job_fetch_and_send, "interval", minutes=15, args=[app])
+    scheduler.start()
 
+    logger.info("Bot startuje...")
     app.run_polling()
 
 if __name__ == "__main__":
