@@ -1,145 +1,137 @@
 import os
-import time
 import logging
-import requests
-from telegram import Bot
-from telegram.ext import ApplicationBuilder, CommandHandler
-from openai import OpenAI
-from datetime import datetime, timedelta
+import asyncio
+import openai
+import httpx
+import time
+from telegram import Update, Bot
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from datetime import datetime
+from gnews import GNews
+import tweepy
 
 # Nastavení logování
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
-# Načtení proměnných z Render Environment Variables
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
-X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
+# Načtení proměnných z Render environment variables
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+X_API_KEY = os.environ.get("X_API_KEY")
+X_API_SECRET = os.environ.get("X_API_SECRET")
+X_ACCESS_TOKEN = os.environ.get("X_ACCESS_TOKEN")
+X_ACCESS_SECRET = os.environ.get("X_ACCESS_SECRET")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# Inicializace OpenAI
-openai = OpenAI(api_key=OPENAI_API_KEY)
+# Inicializace klientů
+openai.api_key = OPENAI_API_KEY
+bot = Bot(token=TELEGRAM_TOKEN)
+gnews = GNews(language='cs', country='Czech Republic', max_results=10)
+auth = tweepy.OAuth1UserHandler(X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET)
+twitter_api = tweepy.API(auth)
 
-# Klíčová slova pro hledání relevantních zpráv
+# Klíčová slova
 KEYWORDS = [
-    "Putin", "Biden", "Trump", "Xi Jinping", "EU", "NATO", "Fed", "ECB",
-    "inflation", "interest rates", "terror attack", "earthquake", "tsunami",
-    "flood", "AI", "OpenAI", "GPT", "Elon Musk", "SpaceX", "Nasdaq100", "US30",
-    "US100", "US500", "Dow Jones", "S&P 500", "currency crash", "USD", "JPY", "EUR"
+    "Trump", "Putin", "Biden", "Zelenskyj", "Xi Jinping", "terorismus", "výbuch", "katastrofa",
+    "tornádo", "záplavy", "zemětřesení", "AI", "umělá inteligence", "GPT", "OpenAI", "Elon Musk",
+    "US30", "US100", "US500", "Nasdaq", "inflace", "úrokové sazby", "ekonomika", "FED", "ECB", "Dogecoin"
 ]
 
-# Uchování ID již odeslaných zpráv, aby se zabránilo duplicitám
 sent_messages = set()
 active = True
 
-# Funkce pro získání zpráv z GNews
 def get_gnews_articles():
-    url = f"https://gnews.io/api/v4/top-headlines?token={GNEWS_API_KEY}&lang=en"
-    response = requests.get(url)
-    articles = response.json().get("articles", [])
-    return [
-        {
-            "title": a["title"],
-            "description": a["description"],
-            "url": a["url"],
-            "source": "GNews"
-        } for a in articles if any(k.lower() in a["title"].lower() for k in KEYWORDS)
-    ]
+    try:
+        news = gnews.get_news(" OR ".join(KEYWORDS))
+        return [{"title": n["title"], "description": n["description"], "url": n["url"], "source": "GNews"} for n in news]
+    except Exception as e:
+        logger.error(f"Chyba při načítání GNews: {e}")
+        return []
 
-# Funkce pro získání tweetů z X
 def get_tweets():
-    headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
-    query = " OR ".join(KEYWORDS)
-    url = f"https://api.twitter.com/2/tweets/search/recent?query={query}&max_results=10&tweet.fields=text,created_at"
-    response = requests.get(url, headers=headers)
-    data = response.json().get("data", [])
-    return [
-        {
-            "title": tweet["text"][:100],
-            "description": tweet["text"],
-            "url": f"https://twitter.com/i/web/status/{tweet['id']}",
-            "source": "X"
-        } for tweet in data
-    ]
+    try:
+        tweets = []
+        for keyword in KEYWORDS:
+            results = twitter_api.search_tweets(q=keyword, lang="en", count=5, result_type="recent")
+            for tweet in results:
+                tweets.append({
+                    "title": tweet.text[:100],
+                    "description": tweet.text,
+                    "url": f"https://twitter.com/user/status/{tweet.id}",
+                    "source": "Twitter"
+                })
+        return tweets
+    except Exception as e:
+        logger.error(f"Chyba při načítání tweetů: {e}")
+        return []
 
-# Funkce pro analýzu zprávy pomocí GPT-4o
 def analyze_article(article):
     prompt = (
         f"Zpráva: {article['title']}\n\n{article['description']}\n\n"
         f"Je relevantní pro světové trhy? Uveď skóre 1–10. "
-        f"Pokud je ≥6, přidej stručný komentář a investiční tip (např. short US30)."
+        f"Pokud je ≥6, přidej komentář a investiční doporučení (např. short US30, long Dogecoin)."
     )
-    response = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7
-    )
-    return response.choices[0].message.content.strip()
-
-# Odeslání zprávy do Telegramu
-def send_to_telegram(bot, text):
     try:
-        bot.send_message(chat_id=CHAT_ID, text=text)
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        logger.error(f"Chyba při odesílání do Telegramu: {e}")
+        logger.error(f"Chyba při volání OpenAI: {e}")
+        return "Chyba v analýze"
 
-# Hlavní funkce zpracování zpráv
+def send_to_telegram(bot, message):
+    try:
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+    except Exception as e:
+        logger.error(f"Chyba při posílání zprávy na Telegram: {e}")
+
 def process_news(bot):
     global sent_messages
-    articles = get_gnews_articles() + get_tweets()
-    for article in articles:
-        if article["url"] in sent_messages:
-            continue
-        analysis = analyze_article(article)
-        if "Skóre" in analysis:
-            score = int(''.join(filter(str.isdigit, analysis.split("Skóre")[1][:2])))
-            if score > 5:
-                message = f"{article['source']} – {article['title']}\n{article['url']}\n\n{analysis}"
-                send_to_telegram(bot, message)
-                sent_messages.add(article["url"])
+    try:
+        articles = get_gnews_articles() + get_tweets()
+        for article in articles:
+            if article["url"] in sent_messages:
+                continue
+            analysis = analyze_article(article)
+            if "Skóre" in analysis:
+                score = int(''.join(filter(str.isdigit, analysis.split("Skóre")[1][:2])))
+                if score > 5:
+                    message = f"{article['source']} – {article['title']}\n{article['url']}\n\n{analysis}"
+                    send_to_telegram(bot, message)
+                    sent_messages.add(article["url"])
+    except Exception as e:
+        logger.error(f"Chyba při zpracování zpráv: {e}")
 
-# Telegram příkazy
-async def start(update, context):
+async def job():
+    while True:
+        try:
+            if active:
+                logger.info("Spouštím kontrolu zpráv...")
+                process_news(bot)
+        except Exception as e:
+            logger.error(f"Chyba v job loop: {e}")
+        await asyncio.sleep(900)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global active
     active = True
     await update.message.reply_text("Bot je aktivní.")
 
-async def stop(update, context):
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global active
     active = False
     await update.message.reply_text("Bot byl pozastaven.")
 
-async def check(update, context):
-    await update.message.reply_text("Kontroluji zprávy...")
-    if active:
-        process_news(context.bot)
-
-# Spuštění bota
 def main():
-    if not TELEGRAM_TOKEN or not CHAT_ID or not OPENAI_API_KEY or not GNEWS_API_KEY or not X_BEARER_TOKEN:
-        logger.error("Některé potřebné proměnné chybí, ukončuji.")
-        return
-
-    bot = Bot(token=TELEGRAM_TOKEN)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(CommandHandler("check", check))
-
-    # Spuštění cyklu každých 15 minut
-    async def job():
-        while True:
-            if active:
-                logger.info("Spouštím kontrolu zpráv...")
-                process_news(bot)
-            await asyncio.sleep(900)  # 15 minut
-
-    import asyncio
     loop = asyncio.get_event_loop()
     loop.create_task(job())
-    loop.run_until_complete(app.run_polling())
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
