@@ -1,179 +1,145 @@
-import asyncio
-import logging
 import os
-
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-from openai import OpenAI
+import time
+import logging
 import requests
+from telegram import Bot
+from telegram.ext import ApplicationBuilder, CommandHandler
+from openai import OpenAI
+from datetime import datetime, timedelta
 
-# --- Nastavení loggeru ---
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Nastavení logování
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
 
-# --- Proměnné z prostředí (Render Variables) ---
+# Načtení proměnných z Render Environment Variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # Kam posílat zprávy
-
+CHAT_ID = os.getenv("CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")      # Twitter API token
-# Přidej další proměnné, pokud chceš
+GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
 
-if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or not OPENAI_API_KEY or not X_BEARER_TOKEN:
-    logging.error("Některé potřebné proměnné chybí, ukončuji.")
-    exit(1)
+# Inicializace OpenAI
+openai = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- Inicializace OpenAI klienta ---
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Klíčová slova pro hledání relevantních zpráv
+KEYWORDS = [
+    "Putin", "Biden", "Trump", "Xi Jinping", "EU", "NATO", "Fed", "ECB",
+    "inflation", "interest rates", "terror attack", "earthquake", "tsunami",
+    "flood", "AI", "OpenAI", "GPT", "Elon Musk", "SpaceX", "Nasdaq100", "US30",
+    "US100", "US500", "Dow Jones", "S&P 500", "currency crash", "USD", "JPY", "EUR"
+]
 
-# --- Stav pro periodickou úlohu ---
-task = None
-task_running = False
+# Uchování ID již odeslaných zpráv, aby se zabránilo duplicitám
+sent_messages = set()
+active = True
 
-# --- Funkce pro rozhodování, jestli zprávu poslat ---
-def should_send_message(score: float) -> bool:
-    return score > 5.0  # Použij škálu podle svých potřeb
+# Funkce pro získání zpráv z GNews
+def get_gnews_articles():
+    url = f"https://gnews.io/api/v4/top-headlines?token={GNEWS_API_KEY}&lang=en"
+    response = requests.get(url)
+    articles = response.json().get("articles", [])
+    return [
+        {
+            "title": a["title"],
+            "description": a["description"],
+            "url": a["url"],
+            "source": "GNews"
+        } for a in articles if any(k.lower() in a["title"].lower() for k in KEYWORDS)
+    ]
 
-# --- Funkce pro získání zpráv z X (Twitter) - příklad ---
-async def fetch_twitter_messages():
-    # Jednoduchý příklad, dej si to podle X API, co máš
+# Funkce pro získání tweetů z X
+def get_tweets():
     headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
-    url = "https://api.twitter.com/2/tweets/search/recent?query=bitcoin"  # Přizpůsob
-    resp = requests.get(url, headers=headers)
-    if resp.status_code != 200:
-        logging.warning(f"Twitter API error: {resp.status_code}")
-        return []
-    data = resp.json()
-    tweets = [t["text"] for t in data.get("data", [])]
-    return tweets
+    query = " OR ".join(KEYWORDS)
+    url = f"https://api.twitter.com/2/tweets/search/recent?query={query}&max_results=10&tweet.fields=text,created_at"
+    response = requests.get(url, headers=headers)
+    data = response.json().get("data", [])
+    return [
+        {
+            "title": tweet["text"][:100],
+            "description": tweet["text"],
+            "url": f"https://twitter.com/i/web/status/{tweet['id']}",
+            "source": "X"
+        } for tweet in data
+    ]
 
-# --- Funkce pro získání zpráv z GNews (přes REST, protože gnewsclient nefunguje) ---
-async def fetch_gnews_messages():
-    # Nahraď svou vlastní GNews API logikou, zde je mock
-    # Pokud nemáš API, můžeš použít jiný zdroj
-    return ["Zpráva z GNews #1", "Zpráva z GNews #2"]
+# Funkce pro analýzu zprávy pomocí GPT-4o
+def analyze_article(article):
+    prompt = (
+        f"Zpráva: {article['title']}\n\n{article['description']}\n\n"
+        f"Je relevantní pro světové trhy? Uveď skóre 1–10. "
+        f"Pokud je ≥6, přidej stručný komentář a investiční tip (např. short US30)."
+    )
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7
+    )
+    return response.choices[0].message.content.strip()
 
-# --- Funkce pro vyhodnocení zprávy přes OpenAI GPT ---
-async def evaluate_message(message: str) -> dict:
-    prompt = f"Posuď tuto zprávu z hlediska tržního potenciálu a relevance pro obchodování:\n\n{message}\n\nOhodnoť ji skóre 1-10 a přidej krátký komentář."
+# Odeslání zprávy do Telegramu
+def send_to_telegram(bot, text):
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Jsi zkušený tržní analytik."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=150,
-        )
-        content = response.choices[0].message.content.strip()
-        # Předpokládáme, že GPT odpoví ve formátu: "Skóre: X\nKomentář: text"
-        lines = content.splitlines()
-        score = 0
-        comment = ""
-        for line in lines:
-            if "skóre" in line.lower():
-                parts = line.split(":")
-                if len(parts) > 1:
-                    try:
-                        score = float(parts[1].strip())
-                    except:
-                        pass
-            elif "komentář" in line.lower():
-                parts = line.split(":", 1)
-                if len(parts) > 1:
-                    comment = parts[1].strip()
-        return {"score": score, "comment": comment, "raw": content}
+        bot.send_message(chat_id=CHAT_ID, text=text)
     except Exception as e:
-        logging.error(f"Chyba při vyhodnocení zprávy: {e}")
-        return {"score": 0, "comment": "", "raw": ""}
+        logger.error(f"Chyba při odesílání do Telegramu: {e}")
 
-# --- Periodická úloha pro kontrolu zpráv ---
-async def periodic_check(app):
-    global task_running
-    logging.info("Periodická úloha spuštěna.")
-    while task_running:
-        try:
-            twitter_msgs = await fetch_twitter_messages()
-            gnews_msgs = await fetch_gnews_messages()
-            all_msgs = twitter_msgs + gnews_msgs
+# Hlavní funkce zpracování zpráv
+def process_news(bot):
+    global sent_messages
+    articles = get_gnews_articles() + get_tweets()
+    for article in articles:
+        if article["url"] in sent_messages:
+            continue
+        analysis = analyze_article(article)
+        if "Skóre" in analysis:
+            score = int(''.join(filter(str.isdigit, analysis.split("Skóre")[1][:2])))
+            if score > 5:
+                message = f"{article['source']} – {article['title']}\n{article['url']}\n\n{analysis}"
+                send_to_telegram(bot, message)
+                sent_messages.add(article["url"])
 
-            for msg in all_msgs:
-                eval_res = await evaluate_message(msg)
-                if should_send_message(eval_res["score"]):
-                    text = (
-                        f"Nová zpráva s potenciálem:\n"
-                        f"Skóre: {eval_res['score']}\n"
-                        f"Komentář: {eval_res['comment']}\n\n"
-                        f"Originál:\n{msg}"
-                    )
-                    await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
-                    logging.info(f"Odeslána zpráva: {msg[:50]}...")
-                else:
-                    logging.info(f"Zpráva zamítnuta (score {eval_res['score']}): {msg[:50]}...")
-        except Exception as e:
-            logging.error(f"Chyba v periodické úloze: {e}")
+# Telegram příkazy
+async def start(update, context):
+    global active
+    active = True
+    await update.message.reply_text("Bot je aktivní.")
 
-        await asyncio.sleep(900)  # 15 minut
+async def stop(update, context):
+    global active
+    active = False
+    await update.message.reply_text("Bot byl pozastaven.")
 
-# --- Handlery příkazů ---
+async def check(update, context):
+    await update.message.reply_text("Kontroluji zprávy...")
+    if active:
+        process_news(context.bot)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global task, task_running
-    if task_running:
-        await update.message.reply_text("Periodická kontrola už běží.")
+# Spuštění bota
+def main():
+    if not TELEGRAM_TOKEN or not CHAT_ID or not OPENAI_API_KEY or not GNEWS_API_KEY or not X_BEARER_TOKEN:
+        logger.error("Některé potřebné proměnné chybí, ukončuji.")
         return
-    task_running = True
-    task = asyncio.create_task(periodic_check(context.application))
-    await update.message.reply_text("Spuštěna periodická kontrola zpráv.")
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global task, task_running
-    if not task_running:
-        await update.message.reply_text("Periodická kontrola neběží.")
-        return
-    task_running = False
-    if task:
-        task.cancel()
-        task = None
-    await update.message.reply_text("Periodická kontrola zastavena.")
-
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Probíhá manuální kontrola zpráv...")
-    try:
-        twitter_msgs = await fetch_twitter_messages()
-        gnews_msgs = await fetch_gnews_messages()
-        all_msgs = twitter_msgs + gnews_msgs
-        sent_count = 0
-        for msg in all_msgs:
-            eval_res = await evaluate_message(msg)
-            if should_send_message(eval_res["score"]):
-                text = (
-                    f"Manuální zpráva s potenciálem:\n"
-                    f"Skóre: {eval_res['score']}\n"
-                    f"Komentář: {eval_res['comment']}\n\n"
-                    f"Originál:\n{msg}"
-                )
-                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
-                sent_count += 1
-        await update.message.reply_text(f"Manuální kontrola hotova. Odesláno {sent_count} zpráv.")
-    except Exception as e:
-        await update.message.reply_text(f"Chyba během manuální kontroly: {e}")
-
-# --- Hlavní funkce ---
-
-async def main():
+    bot = Bot(token=TELEGRAM_TOKEN)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("check", check))
 
-    logging.info("Bot spuštěn")
-    await app.run_polling()
+    # Spuštění cyklu každých 15 minut
+    async def job():
+        while True:
+            if active:
+                logger.info("Spouštím kontrolu zpráv...")
+                process_news(bot)
+            await asyncio.sleep(900)  # 15 minut
+
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.create_task(job())
+    loop.run_until_complete(app.run_polling())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
