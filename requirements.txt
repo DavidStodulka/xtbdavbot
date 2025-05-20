@@ -1,4 +1,5 @@
 python-telegram-bot==20.3
 openai>=1.0.0
-gnewsclient==1.12
-requests
+httpx
+gnews
+tweepy
