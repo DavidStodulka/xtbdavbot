@@ -1,146 +1,80 @@
-import os
-import asyncio
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
-import openai
-import requests
-from datetime import datetime
+import os import logging import openai import requests from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes from datetime import datetime, timedelta import time
 
-# --- Nastavení proměnných z .env ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
-GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
+Načti environmentální proměnné
 
-openai.api_key = OPENAI_API_KEY
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
 
-CHECK_INTERVAL = 15 * 60  # 15 minut v sekundách
+Nastav OpenAI
 
-# --- Stav bota ---
-bot_running = False
+openai.api_key = OPENAI_API_KEY MODEL_NAME = "gpt-4o"
 
+Klíčová slova a témata
 
-# --- Funkce pro vyhodnocení relevance a tipy ---
-async def analyze_news(text: str) -> dict:
-    prompt = (
-        f"Jsi finanční analytik. Zprávu shrň na 1 odstavec, "
-        f"uvedení, zda koupit long nebo short, jaké riziko, a potenciál zisku slovně a "
-        f"číselně na škále 1-10. Pokud je zpráva irelevantní, napiš to jasně."
-        f"\n\nZpráva: {text}\n\nOdpověď:"
+KEYWORDS = [ "Trump", "Biden", "Putin", "terror", "explosion", "earthquake", "AI", "NVIDIA", "Tesla", "NASDAQ", "US100", "US30", "SP500", "interest rates", "inflation", "Dogecoin", "USD", "EUR", "weather disaster", "tsunami", "hurricane" ]
+
+LAST_CHECK = datetime.utcnow() - timedelta(minutes=30)
+
+logging.basicConfig(level=logging.INFO)
+
+async def analyze_and_decide(text): prompt = f""" Zhodnoť následující zprávu: - Je relevantní pro finanční trhy? (ano/ne) - Má potenciál ovlivnit trh? (0-10) - Pokud ano, jaký pohyb může způsobit (long/short/jiné)? - Přidej vlastní komentář k dopadu.
+
+Zpráva:
+{text}
+"""
+
+try:
+    response = openai.ChatCompletion.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5
     )
-    response = await openai.Completion.acreate(
-        model="text-davinci-003",
-        prompt=prompt,
-        max_tokens=200,
-        temperature=0.7,
-        top_p=1,
-        frequency_penalty=0,
-        presence_penalty=0
-    )
-    result = response.choices[0].text.strip()
-    # Očekáváme formát např.:
-    # "Zpráva je relevantní. Doporučuji long na 7/10 riziko střední, potenciál výdělku 6/10."
-    return {"text": result}
+    analysis = response["choices"][0]["message"]["content"]
+    return analysis
+except Exception as e:
+    logging.error(f"Chyba při volání OpenAI: {e}")
+    return "Chyba při analýze zprávy."
 
+def get_x_news(): headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"} query = " OR ".join(KEYWORDS) url = f"https://api.twitter.com/2/tweets/search/recent?query={query}&max_results=10&tweet.fields=created_at,text"
 
-# --- Funkce pro získání zpráv z X (Twitter) ---
-async def fetch_twitter_news():
-    url = "https://api.twitter.com/2/tweets/search/recent"
-    headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
-    query = "(Russia OR Ukraine OR Trump OR AI OR Nasdaq OR Bitcoin OR Dogecoin) lang:en -is:retweet"
-    params = {"query": query, "max_results": 10}
-    resp = requests.get(url, headers=headers, params=params)
-    if resp.status_code != 200:
-        return []
-    data = resp.json()
-    tweets = data.get("data", [])
-    return [tweet["text"] for tweet in tweets]
+try:
+    response = requests.get(url, headers=headers)
+    tweets = response.json().get("data", [])
+    return [t["text"] for t in tweets]
+except Exception as e:
+    logging.error(f"Chyba při stahování z X: {e}")
+    return []
 
+def get_gnews(): try: query = " OR ".join(KEYWORDS) url = f"https://gnews.io/api/v4/search?q={query}&token={os.getenv('GNEWS_API_KEY')}&lang=en" response = requests.get(url) articles = response.json().get("articles", []) return [a["title"] + " - " + a["description"] for a in articles] except Exception as e: logging.error(f"Chyba při stahování z GNews: {e}") return []
 
-# --- Funkce pro získání zpráv z GNews ---
-async def fetch_gnews():
-    url = "https://gnews.io/api/v4/top-headlines"
-    params = {
-        "token": GNEWS_API_KEY,
-        "lang": "en",
-        "max": 10,
-        "topic": "business",
-    }
-    resp = requests.get(url, params=params)
-    if resp.status_code != 200:
-        return []
-    data = resp.json()
-    articles = data.get("articles", [])
-    return [article["title"] + ". " + article.get("description", "") for article in articles]
+async def check_news(context: ContextTypes.DEFAULT_TYPE): global LAST_CHECK now = datetime.utcnow() if now - LAST_CHECK < timedelta(minutes=15): return LAST_CHECK = now
 
+messages = get_x_news() + get_gnews()
 
-# --- Hlavní cyklus, co kontroluje zprávy a posílá tipy ---
-async def news_loop(application):
-    global bot_running
-    while bot_running:
-        try:
-            twitter_news = await fetch_twitter_news()
-            gnews_news = await fetch_gnews()
-            all_news = twitter_news + gnews_news
+for msg in messages:
+    analysis = await analyze_and_decide(msg)
+    if "0" in analysis or "1" in analysis or "2" in analysis or "3" in analysis or "4" in analysis or "5" in analysis:
+        continue  # nerelevantní nebo slabý potenciál
+    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"Zpráva:
 
-            for news in all_news:
-                analysis = await analyze_news(news)
-                text = analysis.get("text", "")
-                # Pokud relevance nad 5 (řekněme že v textu je explicitní info o relevantnosti)
-                if "irrelevant" in text.lower():
-                    continue  # přeskočit nerelevantní
+{msg}
 
-                message = f"Tip z trhu:\n{news}\n\nAnalýza AI:\n{text}"
-                await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-                # Malé zpoždění mezi zprávami, aby nebyl spam
-                await asyncio.sleep(5)
-        except Exception as e:
-            print(f"Chyba ve smyčce: {e}")
+Analýza: {analysis}")
 
-        await asyncio.sleep(CHECK_INTERVAL)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("Bot je aktivní. Provádím monitoring zpráv každých 15 minut.")
 
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("Bot pozastaven (zatím neumím pauzovat automatiku).")
 
-# --- Příkazy bota ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_running
-    if bot_running:
-        await update.message.reply_text("Bot už běží.")
-        return
-    bot_running = True
-    await update.message.reply_text("Bot spuštěn, začínám sledovat zprávy.")
-    # Spustíme smyčku
-    asyncio.create_task(news_loop(context.application))
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("Provádím manuální kontrolu...") await check_news(context)
 
+if name == 'main': app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_running
-    if not bot_running:
-        await update.message.reply_text("Bot už neběží.")
-        return
-    bot_running = False
-    await update.message.reply_text("Bot zastaven.")
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("stop", stop))
+app.add_handler(CommandHandler("check", check))
 
+job_queue = app.job_queue
+job_queue.run_repeating(check_news, interval=900, first=10)  # každých 15 minut
 
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Jsem připraven sledovat zprávy a posílat tipy.")
+print("XTBDavBot běží...")
+app.run_polling()
 
-
-# --- Hlavní funkce ---
-def main():
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stop", stop))
-    application.add_handler(CommandHandler("check", check))
-
-    print("Bot startuje...")
-    application.run_polling()
-
-
-if __name__ == "__main__":
-    main()
