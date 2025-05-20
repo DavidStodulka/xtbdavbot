@@ -1,80 +1,85 @@
-import os import logging import openai import requests from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes from datetime import datetime, timedelta import time
+import os
+import logging
+import requests
+import openai
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from dotenv import load_dotenv
+import time
+import asyncio
 
-Načti environmentální proměnné
+# Načti proměnné z .env
+load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
+GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
-
-Nastav OpenAI
-
-openai.api_key = OPENAI_API_KEY MODEL_NAME = "gpt-4o"
-
-Klíčová slova a témata
-
-KEYWORDS = [ "Trump", "Biden", "Putin", "terror", "explosion", "earthquake", "AI", "NVIDIA", "Tesla", "NASDAQ", "US100", "US30", "SP500", "interest rates", "inflation", "Dogecoin", "USD", "EUR", "weather disaster", "tsunami", "hurricane" ]
-
-LAST_CHECK = datetime.utcnow() - timedelta(minutes=30)
-
+openai.api_key = OPENAI_API_KEY
 logging.basicConfig(level=logging.INFO)
 
-async def analyze_and_decide(text): prompt = f""" Zhodnoť následující zprávu: - Je relevantní pro finanční trhy? (ano/ne) - Má potenciál ovlivnit trh? (0-10) - Pokud ano, jaký pohyb může způsobit (long/short/jiné)? - Přidej vlastní komentář k dopadu.
-
-Zpráva:
-{text}
-"""
-
-try:
-    response = openai.ChatCompletion.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.5
-    )
-    analysis = response["choices"][0]["message"]["content"]
-    return analysis
-except Exception as e:
-    logging.error(f"Chyba při volání OpenAI: {e}")
-    return "Chyba při analýze zprávy."
-
-def get_x_news(): headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"} query = " OR ".join(KEYWORDS) url = f"https://api.twitter.com/2/tweets/search/recent?query={query}&max_results=10&tweet.fields=created_at,text"
-
-try:
+def fetch_from_x():
+    url = "https://api.twitter.com/2/tweets/search/recent?query=trump OR AI OR us500 OR nasdaq OR terrorism OR disaster lang:en&max_results=10"
+    headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
     response = requests.get(url, headers=headers)
-    tweets = response.json().get("data", [])
-    return [t["text"] for t in tweets]
-except Exception as e:
-    logging.error(f"Chyba při stahování z X: {e}")
+    if response.status_code == 200:
+        tweets = response.json().get("data", [])
+        return [tweet["text"] for tweet in tweets]
     return []
 
-def get_gnews(): try: query = " OR ".join(KEYWORDS) url = f"https://gnews.io/api/v4/search?q={query}&token={os.getenv('GNEWS_API_KEY')}&lang=en" response = requests.get(url) articles = response.json().get("articles", []) return [a["title"] + " - " + a["description"] for a in articles] except Exception as e: logging.error(f"Chyba při stahování z GNews: {e}") return []
+def fetch_from_gnews():
+    url = f"https://gnews.io/api/v4/top-headlines?lang=en&token={GNEWS_API_KEY}&max=10"
+    response = requests.get(url)
+    if response.status_code == 200:
+        articles = response.json().get("articles", [])
+        return [article["title"] + " - " + article["description"] for article in articles]
+    return []
 
-async def check_news(context: ContextTypes.DEFAULT_TYPE): global LAST_CHECK now = datetime.utcnow() if now - LAST_CHECK < timedelta(minutes=15): return LAST_CHECK = now
+async def analyze_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    messages = fetch_from_x() + fetch_from_gnews()
+    for msg in messages:
+        try:
+            system_prompt = "Jsi tržní analytik. Vyhodnoť dopad této zprávy na trh. Dej číslo 0-10 (0 = nerelevantní, 10 = silný dopad). Pak napiš krátký komentář proč."
+            user_prompt = f"Zpráva: {msg}"
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+            )
+            answer = response.choices[0].message.content
+            lines = answer.splitlines()
+            rating = None
+            for line in lines:
+                if any(char.isdigit() for char in line):
+                    rating = int("".join(filter(str.isdigit, line)))
+                    break
+            if rating and rating > 5:
+                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"Zpráva: {msg}\n\nAI analýza: {answer}")
+        except Exception as e:
+            logging.error(f"Chyba v analýze zprávy: {e}")
 
-messages = get_x_news() + get_gnews()
+async def periodic_check(app):
+    while True:
+        await analyze_and_send(Update(update_id=0), ContextTypes.DEFAULT_TYPE(application=app))
+        await asyncio.sleep(900)  # 15 minut
 
-for msg in messages:
-    analysis = await analyze_and_decide(msg)
-    if "0" in analysis or "1" in analysis or "2" in analysis or "3" in analysis or "4" in analysis or "5" in analysis:
-        continue  # nerelevantní nebo slabý potenciál
-    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"Zpráva:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Bot je aktivní.")
 
-{msg}
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await analyze_and_send(update, context)
 
-Analýza: {analysis}")
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Zastavuji bot (ale jen v rámci příkazu, ne proces).")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("Bot je aktivní. Provádím monitoring zpráv každých 15 minut.")
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("check", check))
+    app.add_handler(CommandHandler("stop", stop))
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("Bot pozastaven (zatím neumím pauzovat automatiku).")
-
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("Provádím manuální kontrolu...") await check_news(context)
-
-if name == 'main': app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("stop", stop))
-app.add_handler(CommandHandler("check", check))
-
-job_queue = app.job_queue
-job_queue.run_repeating(check_news, interval=900, first=10)  # každých 15 minut
-
-print("XTBDavBot běží...")
-app.run_polling()
-
+    app.job_queue.run_repeating(lambda context: asyncio.create_task(analyze_and_send(Update(update_id=0), context)), interval=900, first=5)
+    app.run_polling()
