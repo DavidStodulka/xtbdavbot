@@ -22,16 +22,13 @@ X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 CHAT_ID = int(os.getenv("CHAT_ID"))  # Tvůj chat ID
 
-# Ukládání ID tweetů a titulků pro odfiltrování duplicit
 sent_tweet_ids = set()
 sent_gnews_titles = set()
 
 async def fetch_tweets() -> List[Dict[str, Any]]:
     url = "https://api.twitter.com/2/tweets/search/recent"
     query = "Bitcoin lang:en -is:retweet"
-    headers = {
-        "Authorization": f"Bearer {X_BEARER_TOKEN}"
-    }
+    headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
     params = {
         "query": query,
         "tweet.fields": "id,text,created_at"
@@ -55,7 +52,7 @@ async def fetch_gnews() -> List[Dict[str, Any]]:
         "token": GNEWS_API_KEY,
         "q": "Bitcoin",
         "lang": "en",
-        "max": 5,
+        "max": 5
     }
     async with httpx.AsyncClient() as client:
         try:
@@ -85,7 +82,6 @@ async def analyze_with_gpt(messages: List[Dict[str, str]]) -> str:
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
-            # Očekáváme validní JSON v odpovědi, ale pokud ne, použijeme text přímo
             try:
                 parsed = json.loads(content)
                 return parsed.get("summary", content)
@@ -97,7 +93,6 @@ async def analyze_with_gpt(messages: List[Dict[str, str]]) -> str:
 
 def create_gpt_prompt(tweets: List[Dict[str, Any]], news: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     combined_text = ""
-
     for t in tweets:
         combined_text += f"Tweet: {t['text']}\n"
     for article in news:
@@ -120,7 +115,6 @@ async def job_fetch_and_send(app: Application):
     tweets = await fetch_tweets()
     news = await fetch_gnews()
 
-    # Filtrování nových tweetů a zpráv
     new_tweets = [t for t in tweets if t["id"] not in sent_tweet_ids]
     new_news = [n for n in news if n["title"] not in sent_gnews_titles]
 
@@ -128,7 +122,6 @@ async def job_fetch_and_send(app: Application):
         logger.info("Žádné nové zprávy k odeslání.")
         return
 
-    # Aktualizace sad ID/titulků
     sent_tweet_ids.update(t["id"] for t in new_tweets)
     sent_gnews_titles.update(n["title"] for n in new_news)
 
@@ -150,7 +143,6 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
 
