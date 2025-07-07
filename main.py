@@ -240,3 +240,21 @@ async def job_fetch_and_send(app: Application):
             analysis = await analyze_with_gpt_single(combined_text)
             comment = analysis.get("comment", "Žádný komentář.")
             recommendation = analysis
+
+if __name__ == "__main__":
+    async def main():
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+        # Plánovač pro stahování a filtrování zpráv
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(job_fetch_and_send, "interval", seconds=90, args=[application])
+        scheduler.start()
+
+        # Příkazy bota
+        application.add_handler(CommandHandler("check", lambda u, c: asyncio.create_task(job_fetch_and_send(application))))
+        application.add_handler(CommandHandler("start", lambda u, c: c.bot.send_message(chat_id=CHAT_ID, text="Bot je online.")))
+
+        print("✅ Bot spuštěn.")
+        await application.run_polling()
+
+    asyncio.run(main())
